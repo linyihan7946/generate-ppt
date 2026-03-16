@@ -33,5 +33,8 @@ test-*.pptx
 test-*.pdf
 test-*.docx
 
+# Output folder
+output/
+
 # Input folder
 input/

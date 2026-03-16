@@ -75,7 +75,14 @@ app.post('/generate-ppt', upload.single('file'), async (req, res) => {
 
         // 3. Generate PPT
         const outputFilename = `presentation-${Date.now()}.pptx`;
-        const outputPath = path.join(__dirname, 'uploads', outputFilename);
+        
+        // Use the output directory in the project root
+        const outputDir = path.join(__dirname, '../output');
+        if (!fs.existsSync(outputDir)) {
+            fs.mkdirSync(outputDir, { recursive: true });
+        }
+        
+        const outputPath = path.join(outputDir, outputFilename);
         
         console.log('Generating PPT...');
         await pptService.generate(docData, outputPath);
