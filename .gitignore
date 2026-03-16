@@ -32,3 +32,6 @@ Thumbs.db
 test-*.pptx
 test-*.pdf
 test-*.docx
+
+# Input folder
+input/
