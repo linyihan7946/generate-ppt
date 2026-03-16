@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Doc to PPT Generator</title>
+    <style>
+        body { font-family: sans-serif; max-width: 600px; margin: 50px auto; text-align: center; }
+        .upload-area { border: 2px dashed #ccc; padding: 40px; border-radius: 10px; cursor: pointer; }
+        .upload-area:hover { border-color: #0088CC; }
+        #status { margin-top: 20px; color: #666; }
+    </style>
+</head>
+<body>
+    <h1>Document to PPT Generator</h1>
+    <p>Upload .md, .docx, or .pdf to generate a presentation.</p>
+    
+    <div class="upload-area" id="drop-zone">
+        <p>Click or drag file here</p>
+        <input type="file" id="file-input" style="display: none;" accept=".md,.docx,.pdf">
+    </div>
+
+    <div id="status"></div>
+
+    <script>
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+        const status = document.getElementById('status');
+
+        dropZone.onclick = () => fileInput.click();
+
+        fileInput.onchange = async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            status.innerText = 'Processing... Please wait.';
+            
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch('/generate-ppt', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (response.ok) {
+                    const blob = await response.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = file.name.split('.')[0] + '.pptx';
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    status.innerText = 'PPT generated successfully!';
+                } else {
+                    status.innerText = 'Error generating PPT: ' + (await response.text());
+                }
+            } catch (err) {
+                status.innerText = 'Error: ' + err.message;
+            }
+        };
+    </script>
+</body>
+</html>
