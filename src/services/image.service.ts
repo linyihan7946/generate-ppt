@@ -34,7 +34,7 @@ export class ImageService {
                 },
                 {
                     headers,
-                    timeout: 60000,
+                    timeout: 120000,
                     proxy: false
                 }
             );
