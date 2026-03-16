@@ -1,36 +1,47 @@
 import axios from 'axios';
 
 export class ImageService {
-    private openaiApiKey: string | undefined;
+    private apiKey: string | undefined;
+    private baseUrl: string;
 
     constructor() {
-        this.openaiApiKey = process.env.OPENAI_API_KEY;
+        this.apiKey = process.env.IMAGE_API_KEY;
+        this.baseUrl = process.env.IMAGE_API_BASE_URL || 'https://www.aigenimage.cn';
     }
 
     async generateImage(prompt: string): Promise<string | null> {
-        if (!this.openaiApiKey) {
-            console.log('No OpenAI API key provided, skipping AI image generation.');
-            return null;
-        }
-
         try {
+            const headers: any = {
+                'Content-Type': 'application/json',
+            };
+
+            if (this.apiKey) {
+                headers['Authorization'] = `Bearer ${this.apiKey}`;
+            }
+
             const response = await axios.post(
-                'https://api.openai.com/v1/images/generations',
+                `${this.baseUrl}/api/image/direct-edit`,
                 {
-                    prompt: `Professional presentation illustration for: ${prompt}`,
-                    n: 1,
-                    size: '1024x1024',
+                    prompt: `Professional presentation illustration: ${prompt}`,
+                    images: [],
+                    model: 'gemini-3-pro-image-preview',
+                    aspect_ratio: '16:9',
+                    resolution: '2K'
                 },
                 {
-                    headers: {
-                        Authorization: `Bearer ${this.openaiApiKey}`,
-                    },
+                    headers,
+                    timeout: 60000
                 }
             );
 
-            return response.data.data[0].url;
+            if (response.data?.success && response.data?.data?.data?.[0]) {
+                return response.data.data.data[0];
+            }
+
+            console.error('Invalid response format:', response.data);
+            return null;
         } catch (error) {
-            console.error('Error generating image:', error);
+            console.error('Error generating image:', error instanceof Error ? error.message : error);
             return null;
         }
     }

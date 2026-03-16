@@ -8,7 +8,7 @@
 - ✅ 自动提取文档层级结构（标题 -> 幻灯片标题）
 - ✅ 保留原始文档顺序和层级
 - ✅ 提取文档中的配图（支持 DOCX 内嵌图片）
-- ✅ 支持 AI 自动生成配图（需配置 OpenAI API Key）
+- ✅ 支持 AI 自动生成配图（基于 aigenimage.cn API）
 - ✅ Web 界面上传文件
 
 ## 快速开始
@@ -21,14 +21,15 @@ npm install
 
 ### 2. 配置环境变量
 
-复制 `.env` 文件并配置：
+复制 `.env.example` 为 `.env` 并配置：
 
 ```env
-OPENAI_API_KEY=your_openai_api_key_here
+IMAGE_API_KEY=your_api_key_here
+IMAGE_API_BASE_URL=https://www.aigenimage.cn
 PORT=3000
 ```
 
-> 如果不配置 `OPENAI_API_KEY`，AI 配图功能将被跳过。
+> 如果不配置 `IMAGE_API_KEY`，AI 配图功能将被跳过。
 
 ### 3. 启动服务
 
@@ -130,13 +131,13 @@ src/
   - Markdown: marked
   - DOCX: mammoth
   - PDF: pdf-parse
-- **AI 配图**: OpenAI DALL-E API
+- **AI 配图**: aigenimage.cn API (Gemini)
 
 ## 注意事项
 
 1. **PDF 解析限制**: PDF 是扁平化文本，可能无法完美还原层级结构
 2. **图片提取**: 目前仅支持 DOCX 内嵌图片，PDF 图片提取需要额外处理
-3. **AI 配图**: 需要配置有效的 OpenAI API Key
+3. **AI 配图**: 需要配置有效的 API Key
 
 ## 开发
 
