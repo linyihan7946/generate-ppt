@@ -54,15 +54,36 @@ export class ParserService {
         } 
         // Check if document has list structure
         else if (/<ol>/i.test(html) || /<ul>/i.test(html)) {
-            slides = this.parseByNestedList(html);
+            // Try to parse by list, but if fails or returns single slide with too much content, fallback
+            const listSlides = this.parseByNestedList(html);
+            if (listSlides.length > 0 && listSlides[0].bullets.length < 20) {
+                slides = listSlides;
+            } else {
+                 slides = this.parseByParagraphs(html);
+            }
         }
-        // Fallback: treat as single slide
+        // Fallback: parse by paragraphs
         else {
-            slides = [{ 
-                title: 'Document', 
-                bullets: html.replace(/<[^>]+>/g, '\n').split('\n').filter(l => l.trim()), 
-                images: [] 
-            }];
+            slides = this.parseByParagraphs(html);
+        }
+        
+        // If we still have only one slide with many bullets, force split it
+        if (slides.length === 1 && slides[0].bullets.length > 8) {
+             const originalSlide = slides[0];
+             const newSlides: SlideContent[] = [];
+             const bullets = originalSlide.bullets;
+             const ITEMS_PER_SLIDE = 6;
+             
+             for (let i = 0; i < bullets.length; i += ITEMS_PER_SLIDE) {
+                 const chunk = bullets.slice(i, i + ITEMS_PER_SLIDE);
+                 const title = i === 0 ? originalSlide.title : `${originalSlide.title} (Cont. ${Math.floor(i/ITEMS_PER_SLIDE) + 1})`;
+                 newSlides.push({
+                     title,
+                     bullets: chunk,
+                     images: i === 0 ? originalSlide.images : []
+                 });
+             }
+             slides = newSlides;
         }
 
         // Extract title from first slide if exists
@@ -73,21 +94,84 @@ export class ParserService {
 
     private parseByHeadings(html: string): SlideContent[] {
         const slides: SlideContent[] = [];
-        const sections = html.split(/<(h[1-6])>/i);
+        // Split by headings h1-h6
+        const parts = html.split(/(<h[1-6][^>]*>.*?<\/h[1-6]>)/i);
         
-        for (let i = 1; i < sections.length; i += 2) {
-            const tag = sections[i];
-            const content = sections[i + 1];
-            const titlePart = content.split(`</${tag}>`)[0];
-            const title = titlePart.replace(/<[^>]+>/g, '');
-            const rest = content.split(`</${tag}>`)[1] || '';
+        let currentSlide: SlideContent | null = null;
+        
+        for (let i = 0; i < parts.length; i++) {
+            const part = parts[i];
+            if (!part.trim()) continue;
             
-            const bullets = this.extractBulletsFromHtml(rest);
-            const images = this.extractImagesFromHtml(rest);
-
-            slides.push({ title, bullets, images });
+            // Check if this part is a heading
+            const headingMatch = part.match(/<h([1-6])[^>]*>(.*?)<\/h\1>/i);
+            
+            if (headingMatch) {
+                // If we have a current slide, push it
+                if (currentSlide) {
+                    slides.push(currentSlide);
+                }
+                
+                // Start a new slide
+                const title = headingMatch[2].replace(/<[^>]+>/g, '').trim();
+                currentSlide = { title, bullets: [], images: [] };
+            } else if (currentSlide) {
+                // Content for the current slide
+                const bullets = this.extractBulletsFromHtml(part);
+                const images = this.extractImagesFromHtml(part);
+                
+                currentSlide.bullets.push(...bullets);
+                currentSlide.images.push(...images);
+            } else {
+                // Content before the first heading - create a default slide or ignore
+                // For now, let's create a title slide if it looks like a title
+                const text = part.replace(/<[^>]+>/g, '').trim();
+                if (text) {
+                     currentSlide = { title: text.substring(0, 50), bullets: [], images: [] };
+                }
+            }
+        }
+        
+        if (currentSlide) {
+            slides.push(currentSlide);
         }
 
+        return slides;
+    }
+    
+    private parseByParagraphs(html: string): SlideContent[] {
+        const slides: SlideContent[] = [];
+        // Split by paragraphs
+        const paragraphs = html.split(/<p[^>]*>/i);
+        
+        let currentSlide: SlideContent | null = null;
+        let slideLineCount = 0;
+        const LINES_PER_SLIDE = 8;
+        
+        for (const p of paragraphs) {
+            const cleanText = p.replace(/<\/p>/i, '').replace(/<[^>]+>/g, '').trim();
+            if (!cleanText) continue;
+            
+            // Heuristic: If text is short and bold/strong, or looks like a title, start new slide
+            // For now, just simple length check or if no slide exists
+            const isTitle = !currentSlide || (cleanText.length < 50 && slideLineCount >= LINES_PER_SLIDE);
+            
+            if (isTitle) {
+                if (currentSlide) slides.push(currentSlide);
+                currentSlide = { title: cleanText, bullets: [], images: [] };
+                slideLineCount = 0;
+            } else if (currentSlide) {
+                currentSlide.bullets.push(cleanText);
+                slideLineCount++;
+                
+                // Extract images from this paragraph
+                const images = this.extractImagesFromHtml(p);
+                currentSlide.images.push(...images);
+            }
+        }
+        
+        if (currentSlide) slides.push(currentSlide);
+        
         return slides;
     }
 
