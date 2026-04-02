@@ -1,342 +1,452 @@
 import * as fs from 'fs';
-import { marked } from 'marked';
 import mammoth from 'mammoth';
-import pdfParse from 'pdf-parse';
 import { DocumentData, SlideContent } from '../types';
+
+interface OutlineNode {
+    text: string;
+    children: OutlineNode[];
+    images: string[];
+}
 
 export class ParserService {
     async parseMarkdown(filePath: string): Promise<DocumentData> {
         const content = fs.readFileSync(filePath, 'utf-8');
-        const tokens = marked.lexer(content);
-        
+        const lines = content.split(/\r?\n/);
+
         const slides: SlideContent[] = [];
         let currentSlide: SlideContent | null = null;
+        let docTitle = '';
 
-        tokens.forEach(token => {
-            if (token.type === 'heading') {
-                if (currentSlide) slides.push(currentSlide);
-                currentSlide = { title: token.text, bullets: [], images: [] };
-            } else if (token.type === 'list') {
-                token.items.forEach(item => {
-                    currentSlide?.bullets.push(item.text);
-                });
-            } else if (token.type === 'paragraph') {
-                if (currentSlide) {
-                    currentSlide.bullets.push(token.text);
-                } else {
-                    currentSlide = { title: token.text, bullets: [], images: [] };
+        const pushCurrentSlide = () => {
+            if (!currentSlide) return;
+            currentSlide.bullets = currentSlide.bullets.map((item) => item.trim()).filter(Boolean);
+            slides.push(currentSlide);
+            currentSlide = null;
+        };
+
+        for (const line of lines) {
+            const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
+            if (headingMatch) {
+                const level = headingMatch[1].length;
+                const headingText = headingMatch[2].trim();
+
+                if (!docTitle && level === 1) {
+                    docTitle = headingText;
                 }
-            } else if (token.type === 'image') {
-                currentSlide?.images.push(token.href);
+
+                pushCurrentSlide();
+                currentSlide = {
+                    title: headingText,
+                    bullets: [],
+                    images: [],
+                    level,
+                };
+                continue;
             }
-        });
 
-        if (currentSlide) slides.push(currentSlide);
+            const listMatch = line.match(/^(\s*)([-*+]|\d+\.)\s+(.+)$/);
+            if (listMatch) {
+                if (!currentSlide) {
+                    currentSlide = { title: docTitle || 'Markdown 内容', bullets: [], images: [], level: 1 };
+                }
+                const indentLevel = Math.floor(listMatch[1].length / 2);
+                const bulletText = `${'  '.repeat(indentLevel)}${listMatch[3].trim()}`;
+                currentSlide.bullets.push(bulletText);
+                continue;
+            }
 
-        return { title: 'Markdown Presentation', slides };
+            const imageRegex = /!\[[^\]]*\]\(([^)]+)\)/g;
+            let imageMatch: RegExpExecArray | null = null;
+            while ((imageMatch = imageRegex.exec(line)) !== null) {
+                if (!currentSlide) {
+                    currentSlide = { title: docTitle || 'Markdown 内容', bullets: [], images: [], level: 1 };
+                }
+                currentSlide.images.push(imageMatch[1].trim());
+            }
+
+            const plainLine = line.replace(/!\[[^\]]*\]\(([^)]+)\)/g, '').trim();
+            if (plainLine) {
+                if (!currentSlide) {
+                    currentSlide = {
+                        title: docTitle || plainLine,
+                        bullets: [],
+                        images: [],
+                        level: 1,
+                    };
+                } else {
+                    currentSlide.bullets.push(plainLine);
+                }
+            }
+        }
+
+        pushCurrentSlide();
+
+        if (slides.length === 0) {
+            slides.push({
+                title: docTitle || 'Markdown Presentation',
+                bullets: [content.trim()].filter(Boolean),
+                images: [],
+                level: 1,
+            });
+        }
+
+        return {
+            title: docTitle || slides[0].title || 'Markdown Presentation',
+            slides,
+        };
     }
 
     async parseDocx(filePath: string): Promise<DocumentData> {
         const buffer = fs.readFileSync(filePath);
-        
-        const { value: html } = await mammoth.convertToHtml({ buffer }, {
-            convertImage: mammoth.images.imgElement(async (image) => {
-                const base64 = await image.readAsBase64String();
-                return { src: `data:${image.contentType};base64,${base64}` };
-            })
-        });
-        
+        const { value: html } = await mammoth.convertToHtml(
+            { buffer },
+            {
+                convertImage: mammoth.images.imgElement(async (image) => {
+                    const base64 = await image.readAsBase64String();
+                    return { src: `data:${image.contentType};base64,${base64}` };
+                }),
+            },
+        );
+
+        const title = this.extractFirstHeading(html) || this.extractFirstText(html) || 'Docx Presentation';
+        const topLevelLists = this.extractTopLevelListBlocks(html);
+
         let slides: SlideContent[] = [];
 
-        // Check if document has heading tags
-        if (/<h[1-6]>/i.test(html)) {
-            slides = this.parseByHeadings(html);
-        } 
-        // Check if document has list structure
-        else if (/<ol>/i.test(html) || /<ul>/i.test(html)) {
-            // Try to parse by list, but if fails or returns single slide with too much content, fallback
-            const listSlides = this.parseByNestedList(html);
-            if (listSlides.length > 0 && listSlides[0].bullets.length < 20) {
-                slides = listSlides;
-            } else {
-                 slides = this.parseByParagraphs(html);
-            }
-        }
-        // Fallback: parse by paragraphs
-        else {
-            slides = this.parseByParagraphs(html);
-        }
-        
-        // If we still have only one slide with many bullets, force split it
-        if (slides.length === 1 && slides[0].bullets.length > 8) {
-             const originalSlide = slides[0];
-             const newSlides: SlideContent[] = [];
-             const bullets = originalSlide.bullets;
-             const ITEMS_PER_SLIDE = 6;
-             
-             for (let i = 0; i < bullets.length; i += ITEMS_PER_SLIDE) {
-                 const chunk = bullets.slice(i, i + ITEMS_PER_SLIDE);
-                 const title = i === 0 ? originalSlide.title : `${originalSlide.title} (Cont. ${Math.floor(i/ITEMS_PER_SLIDE) + 1})`;
-                 newSlides.push({
-                     title,
-                     bullets: chunk,
-                     images: i === 0 ? originalSlide.images : []
-                 });
-             }
-             slides = newSlides;
+        if (topLevelLists.length > 0) {
+            const allNodes = topLevelLists.flatMap((block) => this.parseListBlock(block));
+            slides = this.buildSlidesFromNodes(allNodes, [], 1);
         }
 
-        // Extract title from first slide if exists
-        const title = slides.length > 0 ? slides[0].title : 'Docx Presentation';
+        if (slides.length === 0 && /<h[1-6]\b/i.test(html)) {
+            slides = this.parseByHeadings(html);
+        }
+
+        if (slides.length === 0) {
+            slides = this.parseByParagraphs(html, title);
+        }
+
+        if (slides.length === 0) {
+            slides = [{ title, bullets: [], images: [], level: 1 }];
+        }
 
         return { title, slides };
     }
 
+    async parsePdf(filePath: string): Promise<DocumentData> {
+        const pdfParse = this.loadPdfParse();
+        const dataBuffer = fs.readFileSync(filePath);
+        const data = await (pdfParse as any)(dataBuffer);
+
+        const sections = data.text
+            .split(/\n{2,}/)
+            .map((section: string) => section.trim())
+            .filter((section: string) => section.length > 0);
+
+        const slides: SlideContent[] = sections.map((section: string, index: number) => {
+            const lines = section
+                .split('\n')
+                .map((line: string) => line.trim())
+                .filter((line: string) => line.length > 0);
+
+            const title = lines[0] || `Slide ${index + 1}`;
+            const bullets = lines.slice(1);
+
+            return {
+                title: title.substring(0, 80),
+                bullets,
+                images: [],
+                level: 1,
+            };
+        });
+
+        return {
+            title: slides[0]?.title || 'PDF Presentation',
+            slides: slides.length > 0 ? slides : [{ title: 'PDF Presentation', bullets: [], images: [], level: 1 }],
+        };
+    }
+
+    private loadPdfParse(): any {
+        // Lazy require avoids loading pdf-parse unless PDF parsing is actually requested.
+        // This keeps markdown/docx flow compatible with older Node runtimes.
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const mod = require('pdf-parse');
+            return mod.default || mod;
+        } catch (error) {
+            throw new Error(
+                `PDF parser init failed. Please use a newer Node.js runtime (recommended >=16). Raw error: ${
+                    error instanceof Error ? error.message : String(error)
+                }`,
+            );
+        }
+    }
+
     private parseByHeadings(html: string): SlideContent[] {
         const slides: SlideContent[] = [];
-        // Split by headings h1-h6
-        const parts = html.split(/(<h[1-6][^>]*>.*?<\/h[1-6]>)/i);
-        
-        let currentSlide: SlideContent | null = null;
-        
-        for (let i = 0; i < parts.length; i++) {
-            const part = parts[i];
-            if (!part.trim()) continue;
-            
-            // Check if this part is a heading
-            const headingMatch = part.match(/<h([1-6])[^>]*>(.*?)<\/h\1>/i);
-            
-            if (headingMatch) {
-                // If we have a current slide, push it
-                if (currentSlide) {
-                    slides.push(currentSlide);
-                }
-                
-                // Start a new slide
-                const title = headingMatch[2].replace(/<[^>]+>/g, '').trim();
-                currentSlide = { title, bullets: [], images: [] };
-            } else if (currentSlide) {
-                // Content for the current slide
-                const bullets = this.extractBulletsFromHtml(part);
-                const images = this.extractImagesFromHtml(part);
-                
-                currentSlide.bullets.push(...bullets);
-                currentSlide.images.push(...images);
-            } else {
-                // Content before the first heading - create a default slide or ignore
-                // For now, let's create a title slide if it looks like a title
-                const text = part.replace(/<[^>]+>/g, '').trim();
-                if (text) {
-                     currentSlide = { title: text.substring(0, 50), bullets: [], images: [] };
-                }
-            }
+        const headingRegex = /<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi;
+        const headings: Array<{ level: number; title: string; index: number; end: number }> = [];
+
+        let match: RegExpExecArray | null = null;
+        while ((match = headingRegex.exec(html)) !== null) {
+            headings.push({
+                level: Number(match[1]),
+                title: this.cleanText(match[2]),
+                index: match.index,
+                end: headingRegex.lastIndex,
+            });
         }
-        
-        if (currentSlide) {
-            slides.push(currentSlide);
-        }
+
+        headings.forEach((heading, idx) => {
+            const contentStart = heading.end;
+            const contentEnd = idx + 1 < headings.length ? headings[idx + 1].index : html.length;
+            const block = html.slice(contentStart, contentEnd);
+
+            const bullets = this.extractBulletsFromHtml(block);
+            const images = this.extractImagesFromHtml(block);
+
+            slides.push({
+                title: heading.title || `Section ${idx + 1}`,
+                bullets,
+                images,
+                level: heading.level,
+            });
+        });
 
         return slides;
     }
-    
-    private parseByParagraphs(html: string): SlideContent[] {
+
+    private parseByParagraphs(html: string, fallbackTitle: string): SlideContent[] {
+        const paragraphBlocks = html.match(/<p[^>]*>[\s\S]*?<\/p>/gi) || [];
+        const paragraphs = paragraphBlocks
+            .map((block) => this.cleanText(block))
+            .filter((text) => text.length > 0);
+
+        if (paragraphs.length === 0) {
+            return [];
+        }
+
         const slides: SlideContent[] = [];
-        // Split by paragraphs
-        const paragraphs = html.split(/<p[^>]*>/i);
-        
-        let currentSlide: SlideContent | null = null;
-        let slideLineCount = 0;
-        const LINES_PER_SLIDE = 8;
-        
-        for (const p of paragraphs) {
-            const cleanText = p.replace(/<\/p>/i, '').replace(/<[^>]+>/g, '').trim();
-            if (!cleanText) continue;
-            
-            // Heuristic: If text is short and bold/strong, or looks like a title, start new slide
-            // For now, just simple length check or if no slide exists
-            const isTitle = !currentSlide || (cleanText.length < 50 && slideLineCount >= LINES_PER_SLIDE);
-            
-            if (isTitle) {
-                if (currentSlide) slides.push(currentSlide);
-                currentSlide = { title: cleanText, bullets: [], images: [] };
-                slideLineCount = 0;
-            } else if (currentSlide) {
-                currentSlide.bullets.push(cleanText);
-                slideLineCount++;
-                
-                // Extract images from this paragraph
-                const images = this.extractImagesFromHtml(p);
-                currentSlide.images.push(...images);
-            }
+        const chunkSize = 6;
+
+        for (let i = 0; i < paragraphs.length; i += chunkSize) {
+            const chunk = paragraphs.slice(i, i + chunkSize);
+            const title = i === 0 ? fallbackTitle : `${fallbackTitle}（续 ${Math.floor(i / chunkSize)}）`;
+            slides.push({
+                title,
+                bullets: chunk,
+                images: [],
+                level: 1,
+            });
         }
-        
-        if (currentSlide) slides.push(currentSlide);
-        
+
         return slides;
     }
 
-    private parseByNestedList(html: string): SlideContent[] {
+    private buildSlidesFromNodes(nodes: OutlineNode[], path: string[], level: number): SlideContent[] {
         const slides: SlideContent[] = [];
-        
-        // Find top-level list items (first level <li> inside <ol> or <ul>)
-        // Use regex to extract top-level list items
-        const topLevelListMatch = html.match(/<(ol|ul)>([\s\S]*?)<\/\1>/i);
-        
-        if (!topLevelListMatch) {
-            return slides;
-        }
 
-        const listContent = topLevelListMatch[2];
-        
-        // Split by top-level <li> tags, but need to handle nested lists
-        const items = this.splitTopLevelItems(listContent);
-        
-        for (const item of items) {
-            // Extract title: text before first nested <ol> or <ul>, or entire text
-            const titleMatch = item.match(/^([^<]+|<[^o][^>]*>)*?(?=<ol|<ul|$)/i);
-            let title = '';
-            
-            if (titleMatch) {
-                title = titleMatch[0].replace(/<[^>]+>/g, '').trim();
-            }
-            
-            if (!title) {
-                // Try to get first text content
-                const textMatch = item.match(/>([^<]+)</);
-                title = textMatch ? textMatch[1].trim() : 'Untitled';
+        for (const node of nodes) {
+            if (!node.text) {
+                continue;
             }
 
-            // Extract bullets from nested lists
-            const bullets: string[] = [];
-            this.extractNestedBullets(item, bullets, 0);
+            const shouldCreateSlide = node.children.length > 0 || level <= 2;
+            if (shouldCreateSlide) {
+                const bullets = this.buildBulletsForNode(node);
+                slides.push({
+                    title: node.text,
+                    bullets,
+                    images: node.images,
+                    level,
+                    breadcrumb: path.join(' / '),
+                });
+            }
 
-            // Extract images
-            const images = this.extractImagesFromHtml(item);
-
-            slides.push({ title: title.substring(0, 100), bullets, images });
+            if (node.children.length > 0) {
+                slides.push(...this.buildSlidesFromNodes(node.children, [...path, node.text], level + 1));
+            }
         }
 
         return slides;
     }
 
-    private splitTopLevelItems(html: string): string[] {
-        const items: string[] = [];
+    private buildBulletsForNode(node: OutlineNode): string[] {
+        if (node.children.length === 0) {
+            return [];
+        }
+
+        const allChildrenAreLeaf = node.children.every((child) => child.children.length === 0);
+        if (allChildrenAreLeaf) {
+            return node.children.map((child) => child.text).filter(Boolean);
+        }
+
+        return node.children.map((child) => child.text).filter(Boolean);
+    }
+
+    private parseListBlock(listHtml: string): OutlineNode[] {
+        const inner = listHtml.replace(/^<(ol|ul)\b[^>]*>/i, '').replace(/<\/(ol|ul)>$/i, '');
+        const itemBlocks = this.extractTopLevelLiBlocks(inner);
+
+        return itemBlocks
+            .map((item) => this.parseListItem(item))
+            .filter((node) => node.text.length > 0 || node.children.length > 0);
+    }
+
+    private parseListItem(liBlock: string): OutlineNode {
+        const inner = liBlock.replace(/^<li\b[^>]*>/i, '').replace(/<\/li>$/i, '');
+        const nestedListBlocks = this.extractTopLevelListBlocks(inner);
+        const textRegion = this.removeSegments(inner, nestedListBlocks);
+
+        const text = this.cleanText(textRegion);
+        const images = this.extractImagesFromHtml(textRegion);
+        const children = nestedListBlocks.flatMap((block) => this.parseListBlock(block));
+
+        return {
+            text: text || '未命名主题',
+            children,
+            images,
+        };
+    }
+
+    private extractTopLevelListBlocks(html: string): string[] {
+        const regex = /<\/?(ol|ul)\b[^>]*>/gi;
+        const stack: string[] = [];
+        const blocks: string[] = [];
+        let blockStart = -1;
+        let match: RegExpExecArray | null = null;
+
+        while ((match = regex.exec(html)) !== null) {
+            const token = match[0];
+            const isClosing = token.startsWith('</');
+
+            if (!isClosing) {
+                if (stack.length === 0) {
+                    blockStart = match.index;
+                }
+                stack.push(match[1].toLowerCase());
+            } else if (stack.length > 0) {
+                stack.pop();
+                if (stack.length === 0 && blockStart >= 0) {
+                    blocks.push(html.slice(blockStart, regex.lastIndex));
+                    blockStart = -1;
+                }
+            }
+        }
+
+        return blocks;
+    }
+
+    private extractTopLevelLiBlocks(html: string): string[] {
+        const regex = /<\/?li\b[^>]*>/gi;
+        const blocks: string[] = [];
         let depth = 0;
-        let currentItem = '';
-        let i = 0;
+        let start = -1;
+        let match: RegExpExecArray | null = null;
 
-        while (i < html.length) {
-            if (html.substring(i, i + 4).toLowerCase() === '<li>') {
+        while ((match = regex.exec(html)) !== null) {
+            const token = match[0];
+            const isClosing = token.startsWith('</');
+
+            if (!isClosing) {
                 if (depth === 0) {
-                    if (currentItem.trim()) {
-                        items.push(currentItem.trim());
-                    }
-                    currentItem = '';
+                    start = match.index;
                 }
-                depth++;
-                currentItem += '<li>';
-                i += 4;
-            } else if (html.substring(i, i + 5).toLowerCase() === '</li>') {
-                depth--;
-                currentItem += '</li>';
-                i += 5;
-            } else {
-                currentItem += html[i];
-                i++;
+                depth += 1;
+            } else if (depth > 0) {
+                depth -= 1;
+                if (depth === 0 && start >= 0) {
+                    blocks.push(html.slice(start, regex.lastIndex));
+                    start = -1;
+                }
             }
         }
 
-        if (currentItem.trim()) {
-            items.push(currentItem.trim());
-        }
-
-        return items;
+        return blocks;
     }
 
-    private extractNestedBullets(html: string, bullets: string[], level: number): void {
-        // Find all list items at current level
-        const listMatch = html.match(/<(ol|ul)>([\s\S]*?)<\/\1>/gi);
-        
-        if (!listMatch) {
-            return;
+    private removeSegments(html: string, segments: string[]): string {
+        let result = html;
+        for (const segment of segments) {
+            result = result.replace(segment, ' ');
         }
-
-        for (const list of listMatch) {
-            const items = this.splitTopLevelItems(list.replace(/<\/?(ol|ul)>/gi, ''));
-            
-            for (const item of items) {
-                // Get text content (excluding nested lists)
-                const textContent = item
-                    .replace(/<(ol|ul)>[\s\S]*<\/\1>/gi, '')
-                    .replace(/<[^>]+>/g, '')
-                    .trim();
-                
-                if (textContent && level < 3) { // Limit depth to avoid too many bullets
-                    const indent = '  '.repeat(level);
-                    bullets.push(indent + textContent);
-                }
-
-                // Recursively extract nested bullets
-                const nestedListMatch = item.match(/<(ol|ul)>[\s\S]*<\/\1>/i);
-                if (nestedListMatch) {
-                    this.extractNestedBullets(nestedListMatch[0], bullets, level + 1);
-                }
-            }
-        }
+        return result;
     }
 
     private extractBulletsFromHtml(html: string): string[] {
         const bullets: string[] = [];
-        const liMatches = html.match(/<li>(.*?)<\/li>/gi);
-        
-        if (liMatches) {
-            liMatches.forEach(li => {
-                const text = li.replace(/<[^>]+>/g, '').trim();
-                if (text) bullets.push(text);
-            });
-        }
-        
-        if (bullets.length === 0) {
-            const plainText = html.replace(/<[^>]+>/g, '').trim();
-            if (plainText) {
-                bullets.push(plainText);
+        const listBlocks = this.extractTopLevelListBlocks(html);
+
+        if (listBlocks.length > 0) {
+            for (const block of listBlocks) {
+                const nodes = this.parseListBlock(block);
+                for (const node of nodes) {
+                    bullets.push(node.text);
+                }
             }
         }
 
-        return bullets;
+        if (bullets.length > 0) {
+            return bullets.filter(Boolean);
+        }
+
+        const paragraphBlocks = html.match(/<(p|div)[^>]*>[\s\S]*?<\/(p|div)>/gi) || [];
+        for (const block of paragraphBlocks) {
+            const text = this.cleanText(block);
+            if (text) {
+                bullets.push(text);
+            }
+        }
+
+        return bullets.filter(Boolean);
     }
 
     private extractImagesFromHtml(html: string): string[] {
         const images: string[] = [];
-        const imgMatches = html.match(/<img src="([^"]+)"/g);
-        
-        if (imgMatches) {
-            imgMatches.forEach(match => {
-                const src = match.match(/src="([^"]+)"/)?.[1];
-                if (src) images.push(src);
-            });
+        const imgRegex = /<img[^>]+src="([^"]+)"/gi;
+        let match: RegExpExecArray | null = null;
+
+        while ((match = imgRegex.exec(html)) !== null) {
+            if (match[1]) {
+                images.push(match[1]);
+            }
         }
 
         return images;
     }
 
-    async parsePdf(filePath: string): Promise<DocumentData> {
-        const dataBuffer = fs.readFileSync(filePath);
-        const data = await (pdfParse as any)(dataBuffer);
-        
-        const sections = data.text.split(/\n{3,}/);
-        
-        const slides: SlideContent[] = sections
-            .map((section: string) => section.trim())
-            .filter((section: string) => section.length > 0)
-            .map((section: string, index: number) => {
-                const lines = section.split('\n').map((l: string) => l.trim()).filter((l: string) => l.length > 0);
-                const title = lines[0] || `Slide ${index + 1}`;
-                const bullets = lines.slice(1);
-                
-                return { title: title.substring(0, 100), bullets, images: [] };
-            });
+    private extractFirstHeading(html: string): string {
+        const headingMatch = html.match(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i);
+        return headingMatch ? this.cleanText(headingMatch[1]) : '';
+    }
 
-        return { title: 'PDF Presentation', slides };
+    private extractFirstText(html: string): string {
+        const text = this.cleanText(html);
+        if (!text) return '';
+        return text.length > 60 ? `${text.slice(0, 60)}...` : text;
+    }
+
+    private cleanText(html: string): string {
+        if (!html) return '';
+        const noTags = html.replace(/<[^>]+>/g, ' ');
+        const collapsed = noTags.replace(/\s+/g, ' ').trim();
+        return this.decodeHtmlEntities(collapsed);
+    }
+
+    private decodeHtmlEntities(text: string): string {
+        const entities: Record<string, string> = {
+            '&nbsp;': ' ',
+            '&amp;': '&',
+            '&lt;': '<',
+            '&gt;': '>',
+            '&quot;': '"',
+            '&#39;': "'",
+            '&apos;': "'",
+        };
+
+        let decoded = text.replace(/&(nbsp|amp|lt|gt|quot|#39|apos);/g, (entity) => entities[entity] || entity);
+        decoded = decoded.replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)));
+        decoded = decoded.replace(/&#x([0-9a-fA-F]+);/g, (_, code) => String.fromCharCode(parseInt(code, 16)));
+        return decoded;
     }
 }

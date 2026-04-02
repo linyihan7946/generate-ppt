@@ -1,3 +1,4 @@
+import './polyfills';
 import express from 'express';
 import multer from 'multer';
 import path from 'path';
@@ -63,14 +64,11 @@ app.post('/generate-ppt', upload.single('file'), async (req, res) => {
         }
 
         // 2. Optional: Generate AI Images for slides that have none
-        console.log('Generating AI images (if enabled)...');
-        for (const slide of docData.slides) {
-            if (slide.images.length === 0) {
-                const aiImg = await imageService.generateImage(slide.title);
-                if (aiImg) {
-                    slide.images.push(aiImg);
-                }
-            }
+        const enableAiImages = process.env.ENABLE_AI_IMAGES !== 'false';
+        const imageConcurrency = Number(process.env.IMAGE_CONCURRENCY || 2);
+        if (enableAiImages) {
+            console.log('Generating AI images (if enabled)...');
+            await imageService.enrichSlidesWithGeneratedImages(docData.slides, imageConcurrency);
         }
 
         // 3. Generate PPT

@@ -1,153 +1,79 @@
 # Document to PPT Generator
 
-根据 Markdown、DOCX、PDF 文档自动生成 PowerPoint 演示文稿的后端服务。
+将 `Word / Markdown / PDF` 文档自动生成 PPT，支持：
 
-## 功能特性
+- 按文档层级生成内容页（优先保留原始结构与顺序）
+- 自动排版（标题页 + 内容页 + 图文布局）
+- 自动配图（优先 AI 生成，失败时自动降级兜底）
 
-- ✅ 支持 Markdown (.md)、Word (.docx)、PDF (.pdf) 文件格式
-- ✅ 自动提取文档层级结构（标题 -> 幻灯片标题）
-- ✅ 保留原始文档顺序和层级
-- ✅ 提取文档中的配图（支持 DOCX 内嵌图片）
-- ✅ 支持 AI 自动生成配图（基于 aigenimage.cn API）
-- ✅ Web 界面上传文件
-
-## 快速开始
-
-### 1. 安装依赖
+## 1. 安装
 
 ```bash
 npm install
 ```
 
-### 2. 配置环境变量
+## 2. 环境变量
 
-复制 `.env.example` 为 `.env` 并配置：
+复制 `.env.example` 为 `.env`，并按需修改：
 
 ```env
 IMAGE_API_KEY=your_api_key_here
 IMAGE_API_BASE_URL=https://www.aigenimage.cn
 PORT=3000
+ENABLE_AI_IMAGES=true
+IMAGE_CONCURRENCY=2
 ```
 
-> 如果不配置 `IMAGE_API_KEY`，AI 配图功能将被跳过。
+说明：
 
-### 3. 启动服务
+- `ENABLE_AI_IMAGES=false` 时跳过自动配图
+- `IMAGE_CONCURRENCY` 控制并发配图数，建议 `2~4`
+
+## 3. 启动 Web 服务
 
 ```bash
-# 开发模式
 npm start
-
-# 生产模式
-npm run build
-npm run serve
 ```
 
-服务将在 http://localhost:3000 启动。
+打开 [http://localhost:3000](http://localhost:3000) 上传文件。
 
-## API 使用
+## 4. 命令行直接生成（推荐做批量/调试）
 
-### POST `/generate-ppt`
+```bash
+npm run generate -- --input input/计算机发展史.docx --output output/计算机发展史-optimized.pptx
+```
 
-上传文档并生成 PPT。
+若不指定 `--output`，会自动输出到 `output/` 并带时间戳。
 
-**请求：**
-- Method: `POST`
-- Content-Type: `multipart/form-data`
-- Body: 
-  - `file`: 文档文件（支持 .md, .docx, .pdf）
+## 5. API
 
-**响应：**
-- Content-Type: `application/vnd.openxmlformats-officedocument.presentationml.presentation`
-- 返回生成的 .pptx 文件
+`POST /generate-ppt`
 
-**示例 (cURL)：**
+- `multipart/form-data`
+- 字段：`file`（支持 `.md/.docx/.pdf`）
+- 返回：生成好的 `.pptx`
+
+示例：
 
 ```bash
 curl -X POST http://localhost:3000/generate-ppt \
-  -F "file=@/path/to/document.docx" \
-  --output presentation.pptx
+  -F "file=@input/计算机发展史.docx" \
+  --output output/from-api.pptx
 ```
 
-**示例 (JavaScript)：**
+## 6. 解析策略（重点）
 
-```javascript
-const formData = new FormData();
-formData.append('file', fileInput.files[0]);
+- `DOCX`：优先解析标题 + 多层列表，生成层级化 slide，附带 `breadcrumb`
+- `Markdown`：按 heading/list/paragraph 解析
+- `PDF`：按段落分块解析（PDF 原生结构有限）
 
-const response = await fetch('/generate-ppt', {
-    method: 'POST',
-    body: formData
-});
+## 7. 常见问题
 
-const blob = await response.blob();
-const url = URL.createObjectURL(blob);
-const a = document.createElement('a');
-a.href = url;
-a.download = 'presentation.pptx';
-a.click();
-```
+1. 图片不是每页都来自 AI？
+- 当主图 API 返回失败（如内容审核/模型拒绝）时，会自动使用兜底图源，确保每页仍有配图。
 
-## Web 界面
+2. 为什么服务启动报 Node 兼容问题？
+- 项目已内置 `Object.hasOwn` 兼容补丁；若仍异常，建议 Node `>=16`。
 
-访问 http://localhost:3000 可使用 Web 界面上传文件。
-
-## 文档解析规则
-
-### Markdown
-- `# 标题` → 幻灯片标题
-- 列表项 → 幻灯片要点
-- 段落 → 幻灯片要点
-- 图片链接 → 幻灯片配图
-
-### DOCX
-- 标题样式（Heading 1-6）→ 幻灯片标题
-- 正文段落 → 幻灯片要点
-- 列表项 → 幻灯片要点
-- 内嵌图片 → 幻灯片配图
-
-### PDF
-- 段落分隔（三个以上换行）→ 幻灯片分隔
-- 第一行 → 幻灯片标题
-- 后续行 → 幻灯片要点
-
-## 项目结构
-
-```
-src/
-├── index.ts              # 入口文件，Express 服务
-├── types.ts              # 类型定义
-├── services/
-│   ├── parser.service.ts # 文档解析服务
-│   ├── ppt.service.ts    # PPT 生成服务
-│   └── image.service.ts  # AI 配图服务
-└── uploads/              # 上传文件存储目录
-```
-
-## 技术栈
-
-- **后端框架**: Express + TypeScript
-- **PPT 生成**: pptxgenjs
-- **文档解析**:
-  - Markdown: marked
-  - DOCX: mammoth
-  - PDF: pdf-parse
-- **AI 配图**: aigenimage.cn API (Gemini)
-
-## 注意事项
-
-1. **PDF 解析限制**: PDF 是扁平化文本，可能无法完美还原层级结构
-2. **图片提取**: 目前仅支持 DOCX 内嵌图片，PDF 图片提取需要额外处理
-3. **AI 配图**: 需要配置有效的 API Key
-
-## 开发
-
-```bash
-# 监听模式开发
-npm start
-
-# 编译
-npm run build
-
-# 运行编译后的代码
-npm run serve
-```
+3. 为什么某些页只有标题没有正文？
+- 源文档对应层级可能本身无下级条目，生成器会保留该节点，避免改变原始层级逻辑。
