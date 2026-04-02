@@ -197,10 +197,13 @@ export class PPTService {
 
     private buildOverlayTextRows(slideData: SlideContent): Array<{ text: string; options: Record<string, unknown> }> {
         const rows: Array<{ text: string; options: Record<string, unknown> }> = [];
+        const dedupedBullets = this.deduplicateBullets(slideData.bullets);
+        const summary = this.cleanInlineText(slideData.summary || '');
+        const shouldShowSummary = summary && !this.isSummaryRedundant(summary, dedupedBullets, slideData.title);
 
-        if (slideData.summary) {
+        if (shouldShowSummary) {
             rows.push({
-                text: slideData.summary,
+                text: summary,
                 options: {
                     breakLine: true,
                     color: 'BFDBFE',
@@ -210,7 +213,7 @@ export class PPTService {
             });
         }
 
-        if (slideData.bullets.length === 0) {
+        if (dedupedBullets.length === 0) {
             rows.push({
                 text: 'No sub-items in source content for this node.',
                 options: {
@@ -221,12 +224,12 @@ export class PPTService {
             return rows;
         }
 
-        slideData.bullets.forEach((raw, index) => {
+        dedupedBullets.forEach((raw, index) => {
             const normalized = this.normalizeBullet(raw);
             rows.push({
                 text: `${'  '.repeat(normalized.level)}• ${normalized.text}`,
                 options: {
-                    breakLine: index < slideData.bullets.length - 1,
+                    breakLine: index < dedupedBullets.length - 1,
                     color: 'F8FAFC',
                     fontSize: Math.max(14, 19 - normalized.level),
                 },
@@ -234,6 +237,60 @@ export class PPTService {
         });
 
         return rows;
+    }
+
+    private deduplicateBullets(bullets: string[]): string[] {
+        const unique = new Set<string>();
+        const deduped: string[] = [];
+        for (const raw of bullets) {
+            const normalized = this.normalizeBullet(raw);
+            if (!normalized.text) continue;
+            const key = this.normalizeForCompare(normalized.text);
+            if (!key || unique.has(key)) continue;
+            unique.add(key);
+            deduped.push(raw);
+        }
+        return deduped;
+    }
+
+    private isSummaryRedundant(summary: string, bullets: string[], title: string): boolean {
+        const summaryNorm = this.normalizeForCompare(summary);
+        if (!summaryNorm) return true;
+
+        const summaryWithoutTitleNorm = this.normalizeForCompare(
+            summary.replace(new RegExp(`^\\s*${this.escapeRegExp(title)}\\s*[:：,，。\\-]*\\s*`, 'i'), ''),
+        );
+
+        const candidates = [summaryNorm, summaryWithoutTitleNorm].filter(Boolean);
+        for (const bullet of bullets) {
+            const bulletNorm = this.normalizeForCompare(this.normalizeBullet(bullet).text);
+            if (!bulletNorm) continue;
+            for (const candidate of candidates) {
+                if (!candidate) continue;
+                if (candidate === bulletNorm) {
+                    return true;
+                }
+                if (candidate.length >= 8 && bulletNorm.length >= 8) {
+                    if (candidate.includes(bulletNorm) || bulletNorm.includes(candidate)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private cleanInlineText(text: string): string {
+        return text.replace(/\r?\n+/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+
+    private normalizeForCompare(text: string): string {
+        return this.cleanInlineText(text).toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+    }
+
+    private escapeRegExp(input: string): string {
+        return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
 
     private normalizeBullet(raw: string): { text: string; level: number } {

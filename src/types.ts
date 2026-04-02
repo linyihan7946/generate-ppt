@@ -38,6 +38,8 @@ export interface QualityMetrics {
     avgBulletLength: number;
     levelJumpViolations: number;
     duplicateTitleCount: number;
+    redundantContentSlideCount: number;
+    redundantContentItemCount: number;
     overlaySlideCount: number;
     imageOnlySlideCount: number;
     overflowRiskSlideCount: number;

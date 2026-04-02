@@ -79,6 +79,11 @@ export class EvaluatorService {
 
         const levelJumpViolations = this.countLevelJumpViolations(slides);
         const duplicateTitleCount = this.countDuplicateTitles(slides);
+        const redundantContentSlideCount = slides.filter((s) => this.countIntraSlideRedundancyItems(s) > 0).length;
+        const redundantContentItemCount = slides.reduce(
+            (sum, slide) => sum + this.countIntraSlideRedundancyItems(slide),
+            0,
+        );
         const overlaySlideCount = slides.filter((s) => s.layout !== 'image_only').length;
         const imageOnlySlideCount = slides.filter((s) => s.layout === 'image_only').length;
         const overflowRiskSlideCount = this.countOverflowRiskSlides(slides);
@@ -93,6 +98,8 @@ export class EvaluatorService {
             avgBulletLength: this.round(avgBulletLength, 2),
             levelJumpViolations,
             duplicateTitleCount,
+            redundantContentSlideCount,
+            redundantContentItemCount,
             overlaySlideCount,
             imageOnlySlideCount,
             overflowRiskSlideCount,
@@ -113,6 +120,7 @@ export class EvaluatorService {
 
         evidence.push(`Total slides: ${metrics.slideCount}`);
         evidence.push(`Average bullets per slide: ${metrics.avgBulletsPerSlide}`);
+        evidence.push(`Intra-slide repeated-content items: ${metrics.redundantContentItemCount}`);
 
         const emptyTitleCount = slides.filter((s) => this.cleanText(s.title).length === 0).length;
         if (emptyTitleCount > 0) {
@@ -125,6 +133,22 @@ export class EvaluatorService {
             score -= metrics.duplicateTitleCount * 4;
             issues.push(`${metrics.duplicateTitleCount} duplicate titles detected.`);
             recommendations.push("Rewrite repeated titles to highlight each slide's unique point.");
+        }
+
+        if (metrics.redundantContentItemCount > 0) {
+            const penalty = Math.min(
+                18,
+                metrics.redundantContentSlideCount * 4 + metrics.redundantContentItemCount * 2,
+            );
+            score -= penalty;
+            issues.push(
+                `${metrics.redundantContentItemCount} repeated content items detected on ${metrics.redundantContentSlideCount} slides.`,
+            );
+            recommendations.push(
+                'Reduce same-slide repetition: avoid repeating summary in bullets and remove duplicate bullet points.',
+            );
+        } else {
+            evidence.push('No obvious same-slide repeated content detected.');
         }
 
         if (metrics.levelJumpViolations > 0) {
@@ -307,6 +331,67 @@ export class EvaluatorService {
         return duplicates;
     }
 
+    private countIntraSlideRedundancyItems(slide: SlideContent): number {
+        const bullets = slide.bullets.map((b) => this.cleanText(b)).filter(Boolean);
+        let duplicateItems = 0;
+
+        const bulletCountByKey = new Map<string, number>();
+        bullets.forEach((bullet) => {
+            const key = this.normalizeForCompare(bullet);
+            if (!key) return;
+            bulletCountByKey.set(key, (bulletCountByKey.get(key) || 0) + 1);
+        });
+
+        bulletCountByKey.forEach((count) => {
+            if (count > 1) {
+                duplicateItems += count - 1;
+            }
+        });
+
+        const summary = this.cleanText(slide.summary || '');
+        if (summary && this.isSummaryRedundant(summary, bullets, slide.title)) {
+            duplicateItems += 1;
+        }
+
+        return duplicateItems;
+    }
+
+    private isSummaryRedundant(summary: string, bullets: string[], title: string): boolean {
+        const summaryNormalized = this.normalizeForCompare(summary);
+        if (!summaryNormalized) return true;
+
+        const summaryWithoutTitleNormalized = this.normalizeForCompare(
+            summary.replace(new RegExp(`^\\s*${this.escapeRegExp(title)}\\s*[:：,，。\\-]*\\s*`, 'i'), ''),
+        );
+        const candidates = [summaryNormalized, summaryWithoutTitleNormalized].filter(Boolean);
+
+        for (const bullet of bullets) {
+            const bulletNormalized = this.normalizeForCompare(bullet);
+            if (!bulletNormalized) continue;
+            for (const candidate of candidates) {
+                if (!candidate) continue;
+                if (candidate === bulletNormalized) {
+                    return true;
+                }
+                if (candidate.length >= 8 && bulletNormalized.length >= 8) {
+                    if (candidate.includes(bulletNormalized) || bulletNormalized.includes(candidate)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private normalizeForCompare(text: string): string {
+        return this.cleanText(text).toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+    }
+
+    private escapeRegExp(input: string): string {
+        return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
     private countOverflowRiskSlides(slides: SlideContent[]): number {
         return slides.filter((s) => {
             if (s.layout === 'image_only') return false;
@@ -406,6 +491,9 @@ export class EvaluatorService {
         findings.push(`Prompt alignment average: ${(metrics.promptAlignmentAvg * 100).toFixed(1)}%.`);
         findings.push(
             `Dimension scores -> Logic: ${logic.score}, Layout: ${layout.score}, Image: ${imageSemantics.score}.`,
+        );
+        findings.push(
+            `Same-slide repeated content items: ${metrics.redundantContentItemCount} on ${metrics.redundantContentSlideCount} slides.`,
         );
 
         if (metrics.fallbackImageCount > 0) {

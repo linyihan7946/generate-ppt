@@ -217,7 +217,7 @@ export class PlannerService {
         return {
             index,
             title: title || `Slide ${index}`,
-            summary: summary || title || `Slide ${index}`,
+            summary: this.selectSummary(summary || title || `Slide ${index}`, bullets, title),
             bullets,
             layout,
             imageIntent: imageIntent || title,
@@ -248,7 +248,7 @@ export class PlannerService {
         const rawSlides = docData.slides.map((slide, idx) => {
             const title = this.cleanText(slide.title, 60) || `Slide ${idx + 1}`;
             const bullets = this.normalizeBullets(slide.bullets);
-            const summary = bullets.length > 0 ? `${title}: ${bullets[0]}` : title;
+            const summary = this.buildHeuristicSummary(title, bullets);
             const layout = this.heuristicLayout(title, bullets);
             const imageIntent = this.cleanText(
                 [slide.breadcrumb, title, bullets.slice(0, 2).join(' ')].filter(Boolean).join(' | '),
@@ -286,10 +286,12 @@ export class PlannerService {
             }
 
             const bullets = planned.bullets.length > 0 ? planned.bullets : baseSlide.bullets;
+            const title = planned.title || baseSlide.title;
+            const summary = this.selectSummary(planned.summary || baseSlide.summary || '', bullets, title);
             return {
                 ...baseSlide,
-                title: planned.title || baseSlide.title,
-                summary: planned.summary || baseSlide.summary,
+                title,
+                summary,
                 bullets,
                 layout: planned.layout || baseSlide.layout,
                 imageIntent: planned.imageIntent || baseSlide.imageIntent,
@@ -312,12 +314,70 @@ export class PlannerService {
         for (const raw of bullets) {
             const text = this.cleanText(raw, 80);
             if (!text) continue;
-            if (unique.has(text)) continue;
-            unique.add(text);
+            const key = this.normalizeForCompare(text);
+            if (!key) continue;
+            if (unique.has(key)) continue;
+            unique.add(key);
             normalized.push(text);
         }
 
         return normalized.slice(0, 5);
+    }
+
+    private buildHeuristicSummary(title: string, bullets: string[]): string {
+        if (bullets.length === 0) {
+            return title;
+        }
+
+        const base = title.replace(/[：:]\s*.*$/, '').trim() || title;
+        const summary = `${base}的关键变化与影响`;
+        return this.selectSummary(summary, bullets, title);
+    }
+
+    private selectSummary(summary: string, bullets: string[], title: string): string {
+        const cleaned = this.cleanText(summary, 120);
+        if (!cleaned) return '';
+        if (this.isRedundantSummary(cleaned, bullets, title)) return '';
+        return cleaned;
+    }
+
+    private isRedundantSummary(summary: string, bullets: string[], title: string): boolean {
+        const summaryNormalized = this.normalizeForCompare(summary);
+        if (!summaryNormalized) {
+            return true;
+        }
+
+        const stripped = this.normalizeForCompare(
+            summary.replace(new RegExp(`^\\s*${this.escapeRegExp(title)}\\s*[:：,，。\\-]*\\s*`), ''),
+        );
+        const candidates = [summaryNormalized, stripped].filter(Boolean);
+        for (const bullet of bullets) {
+            const bulletNormalized = this.normalizeForCompare(bullet);
+            if (!bulletNormalized) continue;
+            for (const candidate of candidates) {
+                if (!candidate) continue;
+                if (candidate === bulletNormalized) {
+                    return true;
+                }
+                if (candidate.length >= 8 && bulletNormalized.length >= 8) {
+                    if (candidate.includes(bulletNormalized) || bulletNormalized.includes(candidate)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private normalizeForCompare(text: string): string {
+        return this.cleanText(text, 300)
+            .toLowerCase()
+            .replace(/[\s\p{P}\p{S}]+/gu, '');
+    }
+
+    private escapeRegExp(input: string): string {
+        return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
 
     private heuristicLayout(title: string, bullets: string[]): SlideLayoutType {
