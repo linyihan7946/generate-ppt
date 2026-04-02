@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { SlideContent } from '../types';
+import { SlideContent, SlideImageSource } from '../types';
 
 export class ImageService {
     private apiKey: string | undefined;
@@ -14,12 +14,18 @@ export class ImageService {
 
     async enrichSlidesWithGeneratedImages(slides: SlideContent[], concurrency = 2): Promise<void> {
         const jobs = slides.map((slide) => async () => {
-            if (slide.images.length > 0) return;
+            if (slide.images.length > 0) {
+                if (!slide.imageSource) {
+                    slide.imageSource = 'original';
+                }
+                return;
+            }
 
             const prompt = this.buildPrompt(slide);
-            const imageData = await this.generateImage(prompt);
-            if (imageData) {
-                slide.images.push(imageData);
+            const generated = await this.generateImageWithSource(prompt);
+            if (generated?.data) {
+                slide.images.push(generated.data);
+                slide.imageSource = generated.source;
             }
         });
 
@@ -27,21 +33,31 @@ export class ImageService {
     }
 
     async generateImage(prompt: string): Promise<string | null> {
+        const result = await this.generateImageWithSource(prompt);
+        return result?.data || null;
+    }
+
+    private async generateImageWithSource(
+        prompt: string,
+    ): Promise<{ data: string; source: SlideImageSource } | null> {
         const cacheKey = prompt.trim();
         if (this.cache.has(cacheKey)) {
-            return this.cache.get(cacheKey) || null;
+            return { data: this.cache.get(cacheKey) || '', source: 'ai_primary' };
         }
 
         const primaryImage = await this.generateByPrimaryApi(prompt);
         if (primaryImage) {
             this.cache.set(cacheKey, primaryImage);
-            return primaryImage;
+            return { data: primaryImage, source: 'ai_primary' };
         }
 
         const fallbackImage = await this.generateByFallback(prompt);
         if (fallbackImage) {
             this.cache.set(cacheKey, fallbackImage);
-            return fallbackImage;
+            const source = fallbackImage.includes('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC')
+                ? 'placeholder'
+                : 'ai_fallback';
+            return { data: fallbackImage, source };
         }
 
         return null;
@@ -62,9 +78,9 @@ export class ImageService {
                 {
                     prompt,
                     images: [],
-                    model: 'gemini-3.1-flash-image-preview',
+                    model: process.env.IMAGE_MODEL || 'gemini-3.1-flash-image-preview',
                     aspect_ratio: '16:9',
-                    resolution: '2K',
+                    resolution: process.env.IMAGE_RESOLUTION || '2K',
                 },
                 {
                     headers,
@@ -94,7 +110,7 @@ export class ImageService {
     }
 
     private async generateByFallback(prompt: string): Promise<string | null> {
-        // Fallback keeps the "auto image" behavior available even when the primary image API is unstable.
+        // Keep image generation resilient even when primary image API is unstable.
         const seed = this.hashPrompt(prompt);
         const candidates = [
             `https://picsum.photos/seed/${seed}/1600/900`,
@@ -148,35 +164,51 @@ export class ImageService {
     }
 
     private buildPrompt(slide: SlideContent): string {
-        const context = slide.breadcrumb ? `上下文：${slide.breadcrumb}。` : '';
-        const keyPoints = slide.bullets.slice(0, 4).join('；');
+        const preferredPrompt = this.cleanText(slide.imagePrompt || '', 220);
+        if (preferredPrompt) {
+            return preferredPrompt;
+        }
 
-        return [
-            `Create a high-quality 16:9 presentation illustration about "${slide.title}".`,
+        const context = slide.breadcrumb ? `Context: ${this.cleanText(slide.breadcrumb, 70)}.` : '';
+        const keyPoints = slide.bullets.slice(0, 2).map((p) => this.cleanText(p, 50)).filter(Boolean);
+        const levelHint = slide.level ? `Hierarchy level ${slide.level}.` : '';
+
+        const prompt = [
+            `Create a clean 16:9 presentation illustration for: ${this.cleanText(slide.title, 70)}.`,
             context,
-            keyPoints ? `关键点：${keyPoints}。` : '',
-            'Style: modern, professional, clean composition, no text, no watermark.',
+            keyPoints.length > 0 ? `Key points: ${keyPoints.join('; ')}.` : '',
+            levelHint,
+            'Style: modern, realistic, professional. No text. No watermark.',
         ]
             .filter(Boolean)
             .join(' ');
+
+        return this.cleanText(prompt, 220);
+    }
+
+    private cleanText(text: string, maxLength: number): string {
+        let value = text
+            .replace(/\r?\n+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .replace(/["']/g, (ch) => (ch === '"' ? '"' : "'"))
+            .trim();
+        if (value.length > maxLength) {
+            value = `${value.slice(0, maxLength - 1).trim()}…`;
+        }
+        return value;
     }
 
     private hashPrompt(prompt: string): string {
         let hash = 2166136261;
         for (let i = 0; i < prompt.length; i++) {
             hash ^= prompt.charCodeAt(i);
-            hash +=
-                (hash << 1) +
-                (hash << 4) +
-                (hash << 7) +
-                (hash << 8) +
-                (hash << 24);
+            hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
         }
         return Math.abs(hash >>> 0).toString(36);
     }
 
     private localPlaceholderImage(): string {
-        // 1x1 neutral pixel as last-resort fallback so slides never miss an image slot.
+        // 1x1 neutral pixel as the final fallback so every slide still has image content.
         return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO6WQ9QAAAAASUVORK5CYII=';
     }
 
@@ -188,11 +220,9 @@ export class ImageService {
 
         const workers = Array.from({ length: safeConcurrency }, async () => {
             while (true) {
-                const jobIndex = cursor++;
-                if (jobIndex >= jobs.length) {
-                    break;
-                }
-                await jobs[jobIndex]();
+                const index = cursor++;
+                if (index >= jobs.length) break;
+                await jobs[index]();
             }
         });
 

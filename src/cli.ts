@@ -5,6 +5,8 @@ import dotenv from 'dotenv';
 import { ParserService } from './services/parser.service';
 import { ImageService } from './services/image.service';
 import { PPTService } from './services/ppt.service';
+import { PlannerService } from './services/planner.service';
+import { EvaluatorService } from './services/evaluator.service';
 import { DocumentData } from './types';
 
 dotenv.config();
@@ -30,8 +32,10 @@ async function run(): Promise<void> {
 
     const ext = path.extname(inputPath).toLowerCase();
     const parserService = new ParserService();
+    const plannerService = new PlannerService();
     const imageService = new ImageService();
     const pptService = new PPTService();
+    const evaluatorService = new EvaluatorService();
 
     let docData: DocumentData;
     if (ext === '.md') {
@@ -43,6 +47,8 @@ async function run(): Promise<void> {
     } else {
         throw new Error(`Unsupported file type: ${ext}`);
     }
+
+    docData = await plannerService.planDocument(docData);
 
     const enableAiImages = process.env.ENABLE_AI_IMAGES !== 'false';
     const imageConcurrency = Number(process.env.IMAGE_CONCURRENCY || 2);
@@ -60,6 +66,15 @@ async function run(): Promise<void> {
         : path.join(outputDir, defaultOutputName);
 
     await pptService.generate(docData, outputPath);
+
+    const enableEvaluation = process.env.ENABLE_EVALUATION !== 'false';
+    if (enableEvaluation) {
+        const report = evaluatorService.evaluate(docData, outputPath);
+        const reportPaths = evaluatorService.saveReport(report, outputPath);
+        console.log(`Quality Score: ${report.overallScore} (${report.grade})`);
+        console.log(`Quality JSON: ${reportPaths.jsonPath}`);
+        console.log(`Quality Markdown: ${reportPaths.markdownPath}`);
+    }
 
     console.log(`Generated PPT: ${outputPath}`);
     console.log(`Title: ${docData.title}`);
