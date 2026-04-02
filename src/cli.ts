@@ -7,7 +7,7 @@ import { ImageService } from './services/image.service';
 import { PPTService } from './services/ppt.service';
 import { PlannerService } from './services/planner.service';
 import { EvaluatorService } from './services/evaluator.service';
-import { DocumentData } from './types';
+import { DocumentData, PlannerMode } from './types';
 
 dotenv.config();
 
@@ -17,6 +17,14 @@ function getArgValue(flag: string): string | undefined {
         return undefined;
     }
     return process.argv[index + 1];
+}
+
+function normalizePlannerMode(input?: string): PlannerMode | undefined {
+    if (input === 'strict' || input === 'creative') {
+        return input;
+    }
+
+    return undefined;
 }
 
 async function run(): Promise<void> {
@@ -48,7 +56,12 @@ async function run(): Promise<void> {
         throw new Error(`Unsupported file type: ${ext}`);
     }
 
-    docData = await plannerService.planDocument(docData);
+    const plannerModeArg = getArgValue('--planner-mode');
+    const plannerMode = normalizePlannerMode(plannerModeArg);
+    if (plannerModeArg && !plannerMode) {
+        throw new Error(`Invalid --planner-mode value: ${plannerModeArg}. Use strict or creative.`);
+    }
+    docData = await plannerService.planDocument(docData, { mode: plannerMode });
 
     const enableAiImages = process.env.ENABLE_AI_IMAGES !== 'false';
     const imageConcurrency = Number(process.env.IMAGE_CONCURRENCY || 2);

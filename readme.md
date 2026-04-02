@@ -33,6 +33,7 @@ PLANNER_MODEL=gemini-3.1-pro-preview
 PLANNER_API_BASE_URL=https://www.aigenimage.cn:3001
 PLANNER_AUTH_TOKEN=
 LLM_AUTH_TOKEN=
+PLANNER_CONTENT_MODE=strict
 PLANNER_USE_GUEST_LOGIN=false
 ENABLE_EVALUATION=true
 
@@ -45,8 +46,14 @@ PPT_MAX_BULLETS_PER_SLIDE=5
 ### Planner auth notes
 
 - `PLANNER_AUTH_TOKEN` (or `LLM_AUTH_TOKEN`) is used for `/api/llm`.
+- If planner-specific token is empty, the planner will also try `IMAGE_API_KEY`.
 - If not provided, planner falls back to local heuristic planning.
 - `PLANNER_USE_GUEST_LOGIN=true` can auto-login guest, but guest accounts may have zero points.
+
+### Planner content modes
+
+- `PLANNER_CONTENT_MODE=strict` (default): stay as close as possible to source content and wording.
+- `PLANNER_CONTENT_MODE=creative`: keep slide order and hierarchy, but allow Gemini 3.1 Pro to lightly polish bullets, summaries, and image direction without adding unsupported facts.
 
 ### Quality evaluation system
 
@@ -75,12 +82,19 @@ Open <http://localhost:3000>.
 npm run generate -- --input input/计算机发展史.docx --output output/计算机发展史-unified.pptx
 ```
 
+Creative mode:
+
+```bash
+npm run generate -- --input input/计算机发展史.docx --output output/计算机发展史-creative.pptx --planner-mode creative
+```
+
 ## API
 
 `POST /generate-ppt`
 
 - Content-Type: `multipart/form-data`
 - Field: `file` (`.md/.docx/.pdf`)
+- Optional field: `plannerMode` (`strict` or `creative`)
 - Returns: generated `.pptx`
 
 Example:
@@ -88,6 +102,7 @@ Example:
 ```bash
 curl -X POST http://localhost:3000/generate-ppt \
   -F "file=@input/计算机发展史.docx" \
+  -F "plannerMode=creative" \
   --output output/from-api.pptx
 ```
 

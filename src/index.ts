@@ -11,7 +11,7 @@ import { PPTService } from './services/ppt.service';
 import { ImageService } from './services/image.service';
 import { PlannerService } from './services/planner.service';
 import { EvaluatorService } from './services/evaluator.service';
-import { DocumentData } from './types';
+import { DocumentData, PlannerMode } from './types';
 
 dotenv.config();
 
@@ -44,6 +44,14 @@ const imageService = new ImageService();
 const plannerService = new PlannerService();
 const evaluatorService = new EvaluatorService();
 
+function normalizePlannerMode(input?: string): PlannerMode | undefined {
+    if (input === 'strict' || input === 'creative') {
+        return input;
+    }
+
+    return undefined;
+}
+
 app.post('/generate-ppt', upload.single('file'), async (req, res) => {
     try {
         if (!req.file) {
@@ -68,8 +76,14 @@ app.post('/generate-ppt', upload.single('file'), async (req, res) => {
         }
 
         // 2. Plan slide narrative/layout (Gemini 3.1 Pro + fallback heuristics)
+        const plannerModeArg = typeof req.body?.plannerMode === 'string' ? req.body.plannerMode : undefined;
+        const plannerMode = normalizePlannerMode(plannerModeArg);
+        if (plannerModeArg && !plannerMode) {
+            return res.status(400).send('Invalid plannerMode. Use strict or creative.');
+        }
+
         console.log('Planning slide narrative and layout...');
-        docData = await plannerService.planDocument(docData);
+        docData = await plannerService.planDocument(docData, { mode: plannerMode });
 
         // 3. Optional: Generate AI Images for slides that have none
         const enableAiImages = process.env.ENABLE_AI_IMAGES !== 'false';

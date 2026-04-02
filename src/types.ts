@@ -1,5 +1,6 @@
 export type SlideLayoutType = 'image_overlay' | 'image_only';
 export type SlideImageSource = 'original' | 'ai_primary' | 'ai_fallback' | 'placeholder';
+export type PlannerMode = 'strict' | 'creative';
 
 export interface SlideContent {
     title: string;
@@ -18,6 +19,10 @@ export interface SlideContent {
 export interface DocumentData {
     title: string;
     slides: SlideContent[];
+}
+
+export interface PlannerOptions {
+    mode?: PlannerMode;
 }
 
 export interface QualityDimensionScore {

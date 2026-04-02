@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { DocumentData, SlideContent, SlideLayoutType } from '../types';
+import { DocumentData, PlannerMode, PlannerOptions, SlideContent, SlideLayoutType } from '../types';
 
 interface PlannedSlide {
     index: number;
@@ -19,25 +19,30 @@ interface PlannedDocument {
 export class PlannerService {
     private baseUrl: string;
     private authToken: string;
+    private fallbackAuthToken: string;
     private model: string;
     private enabled: boolean;
     private allowGuestLogin: boolean;
+    private defaultMode: PlannerMode;
 
     constructor() {
         this.baseUrl = process.env.PLANNER_API_BASE_URL || process.env.IMAGE_API_BASE_URL || 'https://www.aigenimage.cn:3001';
         this.authToken = process.env.PLANNER_AUTH_TOKEN || process.env.LLM_AUTH_TOKEN || '';
+        this.fallbackAuthToken = process.env.IMAGE_API_KEY || '';
         this.model = process.env.PLANNER_MODEL || 'gemini-3.1-pro-preview';
         this.enabled = process.env.ENABLE_PLANNER !== 'false';
         this.allowGuestLogin = process.env.PLANNER_USE_GUEST_LOGIN === 'true';
+        this.defaultMode = process.env.PLANNER_CONTENT_MODE === 'creative' ? 'creative' : 'strict';
     }
 
-    async planDocument(docData: DocumentData): Promise<DocumentData> {
-        const heuristic = this.buildHeuristicPlan(docData);
+    async planDocument(docData: DocumentData, options: PlannerOptions = {}): Promise<DocumentData> {
+        const mode = this.resolvePlannerMode(options.mode);
+        const heuristic = this.buildHeuristicPlan(docData, mode);
         if (!this.enabled) {
             return heuristic;
         }
 
-        const llmPlan = await this.generatePlanWithGemini(docData);
+        const llmPlan = await this.generatePlanWithGemini(docData, mode);
         if (!llmPlan) {
             return heuristic;
         }
@@ -45,27 +50,28 @@ export class PlannerService {
         return this.mergePlan(heuristic, llmPlan);
     }
 
-    private async generatePlanWithGemini(docData: DocumentData): Promise<PlannedDocument | null> {
+    private async generatePlanWithGemini(docData: DocumentData, mode: PlannerMode): Promise<PlannedDocument | null> {
         const token = await this.resolveAuthToken();
         if (!token) {
-            console.warn('Planner skipped: missing PLANNER_AUTH_TOKEN / LLM_AUTH_TOKEN.');
+            console.warn('Planner skipped: missing PLANNER_AUTH_TOKEN / LLM_AUTH_TOKEN / IMAGE_API_KEY.');
             return null;
         }
 
         const systemPrompt = [
             'You are a professional presentation strategist.',
             'You must preserve source hierarchy and slide order.',
+            this.buildModeDirective(mode),
             'Return only valid JSON with no markdown fences and no extra text.',
         ].join(' ');
 
-        const userPrompt = this.buildUserPrompt(docData);
+        const userPrompt = this.buildUserPrompt(docData, mode);
         const payload = {
             prompt: userPrompt,
             messages: [
                 { role: 'system', content: systemPrompt },
                 { role: 'user', content: userPrompt },
             ],
-            temperature: 0.15,
+            temperature: mode === 'creative' ? 0.35 : 0.15,
             useSearch: false,
             model: this.model,
             stream: false,
@@ -136,10 +142,10 @@ export class PlannerService {
             console.warn('Guest login for planner failed:', error?.message || error);
         }
 
-        return '';
+        return this.fallbackAuthToken;
     }
 
-    private buildUserPrompt(docData: DocumentData): string {
+    private buildUserPrompt(docData: DocumentData, mode: PlannerMode): string {
         const compactSlides = docData.slides.map((slide, idx) => ({
             index: idx + 1,
             title: slide.title,
@@ -152,7 +158,7 @@ export class PlannerService {
             'Task: build a slide-by-slide planning JSON for a PPT generator.',
             'Must keep slide order and hierarchy. Do NOT merge, split, or reorder slides.',
             'Each output slide index must match input index.',
-            'Bullets: keep 2-5 concise bullets, extracted from source meaning.',
+            ...this.buildModeRules(mode),
             'layout must be one of: image_overlay, image_only.',
             'imagePrompt must be <= 220 chars, concise, visual, no text/watermark.',
             'Output schema:',
@@ -244,17 +250,17 @@ export class PlannerService {
         return '';
     }
 
-    private buildHeuristicPlan(docData: DocumentData): DocumentData {
+    private buildHeuristicPlan(docData: DocumentData, mode: PlannerMode): DocumentData {
         const rawSlides = docData.slides.map((slide, idx) => {
             const title = this.cleanText(slide.title, 60) || `Slide ${idx + 1}`;
             const bullets = this.normalizeBullets(slide.bullets);
-            const summary = this.buildHeuristicSummary(title, bullets);
+            const summary = this.buildHeuristicSummary(title, bullets, mode);
             const layout = this.heuristicLayout(title, bullets);
             const imageIntent = this.cleanText(
                 [slide.breadcrumb, title, bullets.slice(0, 2).join(' ')].filter(Boolean).join(' | '),
                 160,
             );
-            const imagePrompt = this.heuristicImagePrompt(title, bullets, slide.breadcrumb);
+            const imagePrompt = this.heuristicImagePrompt(title, bullets, slide.breadcrumb, mode);
 
             return {
                 ...slide,
@@ -324,14 +330,18 @@ export class PlannerService {
         return normalized.slice(0, 5);
     }
 
-    private buildHeuristicSummary(title: string, bullets: string[]): string {
+    private buildHeuristicSummary(title: string, bullets: string[], mode: PlannerMode): string {
         if (bullets.length === 0) {
             return title;
         }
 
         const base = title.replace(/[：:]\s*.*$/, '').trim() || title;
         const summary = `${base}的关键变化与影响`;
-        return this.selectSummary(summary, bullets, title);
+        const finalSummary =
+            mode === 'creative'
+                ? this.cleanText(`${title}. ${bullets.slice(0, 2).join(' ')}`, 120) || summary
+                : summary;
+        return this.selectSummary(finalSummary, bullets, title);
     }
 
     private selectSummary(summary: string, bullets: string[], title: string): string {
@@ -388,7 +398,12 @@ export class PlannerService {
         return 'image_overlay';
     }
 
-    private heuristicImagePrompt(title: string, bullets: string[], breadcrumb?: string): string {
+    private heuristicImagePrompt(
+        title: string,
+        bullets: string[],
+        breadcrumb?: string,
+        mode: PlannerMode = 'strict',
+    ): string {
         const combined = [title, ...bullets, breadcrumb || ''].join(' ');
         if (this.isSensitiveEntity(combined)) {
             const context = this.cleanText(this.stripSensitiveTerms(`${breadcrumb || ''} ${title}`), 52);
@@ -399,9 +414,11 @@ export class PlannerService {
                   : 'technology industry development';
 
             const prompt = [
-                `16:9 professional illustration of ${era}.`,
+                `${mode === 'creative' ? 'Cinematic' : 'Professional'} 16:9 illustration of ${era}.`,
                 context ? `Theme keywords: ${context}.` : '',
-                'Visual elements: computer devices, team collaboration, data network, innovation.',
+                mode === 'creative'
+                    ? 'Visual elements: iconic devices, team collaboration, layered data network, sense of momentum and innovation.'
+                    : 'Visual elements: computer devices, team collaboration, data network, innovation.',
                 'No text, no logo, no watermark.',
             ]
                 .filter(Boolean)
@@ -412,9 +429,11 @@ export class PlannerService {
 
         const ingredients = [title, ...bullets.slice(0, 2)].filter(Boolean).join('; ');
         const prompt = [
-            `Cinematic 16:9 slide illustration about ${ingredients}.`,
+            `${mode === 'creative' ? 'Cinematic' : 'Professional'} 16:9 slide illustration about ${ingredients}.`,
             breadcrumb ? `Context: ${this.cleanText(breadcrumb, 60)}.` : '',
-            'Modern, clean composition, no text, no watermark.',
+            mode === 'creative'
+                ? 'Modern, layered composition with clear focal point, polished lighting, no text, no watermark.'
+                : 'Modern, clean composition, no text, no watermark.',
         ]
             .filter(Boolean)
             .join(' ');
@@ -471,6 +490,40 @@ export class PlannerService {
         const parts = breadcrumb.split('/').map((p) => p.trim()).filter(Boolean);
         if (parts.length === 0) return '';
         return this.cleanText(parts[parts.length - 1], 24);
+    }
+
+    private resolvePlannerMode(mode?: PlannerMode): PlannerMode {
+        if (mode === 'creative' || mode === 'strict') {
+            return mode;
+        }
+
+        return this.defaultMode;
+    }
+
+    private buildModeDirective(mode: PlannerMode): string {
+        if (mode === 'creative') {
+            return 'Use source-grounded creativity: lightly polish phrasing, sharpen takeaways, and enrich visual direction without changing facts.';
+        }
+
+        return 'Use maximum source fidelity: stay close to the source wording and meaning, with no unsupported additions.';
+    }
+
+    private buildModeRules(mode: PlannerMode): string[] {
+        if (mode === 'creative') {
+            return [
+                'Mode: creative. You may lightly polish wording, sharpen takeaways, and add small connective phrasing for better presentation flow.',
+                'Do not introduce unsupported factual claims, dates, statistics, or named entities.',
+                'Bullets: keep 2-5 concise bullets grounded in the source, but you may rewrite them to be more presentation-ready.',
+                'summary should be presentation-oriented, vivid, and still fully grounded in the source.',
+            ];
+        }
+
+        return [
+            'Mode: strict. Stay as close as possible to the source content and wording.',
+            'Do not introduce new facts, examples, interpretations, dates, or named entities.',
+            'Bullets: keep 2-5 concise bullets extracted directly from source meaning.',
+            'summary should be a faithful paraphrase with no extra interpretation.',
+        ];
     }
 
     private cleanText(input: any, maxLength: number): string {
