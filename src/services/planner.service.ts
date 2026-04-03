@@ -1,4 +1,5 @@
 import axios from 'axios';
+import fs from 'fs';
 import { DocumentData, PlannerMode, PlannerOptions, SlideContent, SlideLayoutType } from '../types';
 
 interface PlannedSlide {
@@ -16,6 +17,12 @@ interface PlannedDocument {
     slides: PlannedSlide[];
 }
 
+interface SparseExpansionSlide {
+    index: number;
+    summary: string;
+    bullets: string[];
+}
+
 export class PlannerService {
     private baseUrl: string;
     private authToken: string;
@@ -24,8 +31,12 @@ export class PlannerService {
     private enabled: boolean;
     private allowGuestLogin: boolean;
     private defaultMode: PlannerMode;
+    private sparseExpansionEnabled: boolean;
+    private workerUrl: string;
+    private workerApiKey: string;
 
     constructor() {
+        const externalEnv = this.loadExternalPlannerEnv();
         this.baseUrl = process.env.PLANNER_API_BASE_URL || process.env.IMAGE_API_BASE_URL || 'https://www.aigenimage.cn:3001';
         this.authToken = process.env.PLANNER_AUTH_TOKEN || process.env.LLM_AUTH_TOKEN || '';
         this.fallbackAuthToken = process.env.IMAGE_API_KEY || '';
@@ -33,24 +44,37 @@ export class PlannerService {
         this.enabled = process.env.ENABLE_PLANNER !== 'false';
         this.allowGuestLogin = process.env.PLANNER_USE_GUEST_LOGIN === 'true';
         this.defaultMode = process.env.PLANNER_CONTENT_MODE === 'creative' ? 'creative' : 'strict';
+        this.sparseExpansionEnabled = process.env.PLANNER_EXPAND_SPARSE_CONTENT !== 'false';
+        this.workerUrl = process.env.CLOUDFLARE_WORKER_URL || externalEnv.CLOUDFLARE_WORKER_URL || '';
+        this.workerApiKey =
+            process.env.LLM_API_KEY || process.env.GOOGLE_API_KEY || externalEnv.LLM_API_KEY || externalEnv.GOOGLE_API_KEY || '';
     }
 
     async planDocument(docData: DocumentData, options: PlannerOptions = {}): Promise<DocumentData> {
         const mode = this.resolvePlannerMode(options.mode);
         const heuristic = this.buildHeuristicPlan(docData, mode);
+        let plannedDoc = heuristic;
+
         if (!this.enabled) {
-            return heuristic;
+            return this.expandSparseSlidesIfNeeded(plannedDoc, mode);
         }
 
         const llmPlan = await this.generatePlanWithGemini(docData, mode);
-        if (!llmPlan) {
-            return heuristic;
+        if (llmPlan) {
+            plannedDoc = this.mergePlan(heuristic, llmPlan);
         }
 
-        return this.mergePlan(heuristic, llmPlan);
+        return this.expandSparseSlidesIfNeeded(plannedDoc, mode);
     }
 
     private async generatePlanWithGemini(docData: DocumentData, mode: PlannerMode): Promise<PlannedDocument | null> {
+        if (this.canUseWorkerProxy()) {
+            const viaWorker = await this.generatePlanWithWorkerProxy(docData, mode);
+            if (viaWorker) {
+                return viaWorker;
+            }
+        }
+
         const token = await this.resolveAuthToken();
         if (!token) {
             console.warn('Planner skipped: missing PLANNER_AUTH_TOKEN / LLM_AUTH_TOKEN / IMAGE_API_KEY.');
@@ -113,13 +137,42 @@ export class PlannerService {
         }
     }
 
+    private async generatePlanWithWorkerProxy(docData: DocumentData, mode: PlannerMode): Promise<PlannedDocument | null> {
+        const systemPrompt = [
+            'You are a professional presentation strategist.',
+            'You must preserve source hierarchy and slide order.',
+            this.buildModeDirective(mode),
+            'Return only valid JSON with no markdown fences and no extra text.',
+        ].join(' ');
+        const userPrompt = this.buildUserPrompt(docData, mode);
+        const prompt = `${systemPrompt}\n\n${userPrompt}`;
+
+        try {
+            const text = await this.callGeminiViaWorker(prompt, mode === 'creative' ? 0.35 : 0.15);
+            if (!text) {
+                return null;
+            }
+
+            const parsed = this.parsePlannedDocument(text);
+            if (!parsed || parsed.slides.length === 0) {
+                console.warn('Planner worker proxy returned invalid JSON structure.');
+                return null;
+            }
+
+            return parsed;
+        } catch (error: any) {
+            console.warn('Planner worker proxy request failed:', error?.message || error);
+            return null;
+        }
+    }
+
     private async resolveAuthToken(): Promise<string> {
         if (this.authToken) {
             return this.authToken;
         }
 
         if (!this.allowGuestLogin) {
-            return '';
+            return this.fallbackAuthToken;
         }
 
         try {
@@ -313,6 +366,302 @@ export class PlannerService {
         };
     }
 
+    private async expandSparseSlidesIfNeeded(docData: DocumentData, mode: PlannerMode): Promise<DocumentData> {
+        if (!this.sparseExpansionEnabled) {
+            return docData;
+        }
+
+        const sparseIndexes = this.collectSparseSlideIndexes(docData.slides);
+        if (sparseIndexes.length === 0) {
+            return docData;
+        }
+
+        // Always apply a deterministic local expansion first to avoid empty pages.
+        const heuristicExpanded = this.applyHeuristicSparseExpansion(docData, sparseIndexes, mode);
+
+        const token = await this.resolveAuthToken();
+        if (!token) {
+            return heuristicExpanded;
+        }
+
+        const expandedByLlm = await this.generateSparseExpansionWithGemini(
+            heuristicExpanded,
+            sparseIndexes,
+            mode,
+            token,
+        );
+        if (expandedByLlm.size === 0) {
+            return heuristicExpanded;
+        }
+
+        return this.applySparseExpansion(heuristicExpanded, expandedByLlm, mode);
+    }
+
+    private collectSparseSlideIndexes(slides: SlideContent[]): number[] {
+        const indexes: number[] = [];
+        slides.forEach((slide, idx) => {
+            const bulletCount = slide.bullets.filter((b) => this.cleanText(b, 120).length > 0).length;
+            const summaryLength = this.cleanText(slide.summary || '', 160).length;
+            const textLength = this.cleanText(`${slide.title} ${slide.summary || ''} ${slide.bullets.join(' ')}`, 500)
+                .length;
+            const isLikelyCover = idx === 0 && bulletCount === 0 && summaryLength === 0;
+            const isSparse = bulletCount <= 1 || textLength < 85 || (summaryLength === 0 && bulletCount < 2);
+
+            if (!isLikelyCover && isSparse) {
+                indexes.push(idx + 1);
+            }
+        });
+        return indexes;
+    }
+
+    private applyHeuristicSparseExpansion(docData: DocumentData, sparseIndexes: number[], mode: PlannerMode): DocumentData {
+        const sparseSet = new Set<number>(sparseIndexes);
+        const slides = docData.slides.map((slide, idx) => {
+            const currentIndex = idx + 1;
+            if (!sparseSet.has(currentIndex)) {
+                return slide;
+            }
+
+            const title = this.cleanText(slide.title, 60) || `Slide ${currentIndex}`;
+            const existingBullets = this.normalizeBullets(slide.bullets);
+            const fallbackBullets = [
+                `${title}: background and context`,
+                `${title}: key points and impact`,
+                mode === 'creative' ? `${title}: practical takeaway` : '',
+            ]
+                .map((item) => this.cleanText(item, 80))
+                .filter(Boolean);
+
+            const bullets = this.normalizeBullets([...existingBullets, ...fallbackBullets]).slice(0, 4);
+            const summarySeed =
+                slide.summary ||
+                this.cleanText(`${title}. ${bullets.slice(0, 2).join(' ')}`, 120) ||
+                `${title} overview`;
+            const summary = this.selectSummary(summarySeed, bullets, title);
+
+            return {
+                ...slide,
+                bullets,
+                summary,
+            };
+        });
+
+        return {
+            ...docData,
+            slides,
+        };
+    }
+
+    private async generateSparseExpansionWithGemini(
+        docData: DocumentData,
+        sparseIndexes: number[],
+        mode: PlannerMode,
+        token: string,
+    ): Promise<Map<number, SparseExpansionSlide>> {
+        if (this.canUseWorkerProxy()) {
+            const viaWorker = await this.generateSparseExpansionWithWorkerProxy(docData, sparseIndexes, mode);
+            if (viaWorker.size > 0) {
+                return viaWorker;
+            }
+        }
+
+        const sparseSet = new Set<number>(sparseIndexes);
+        const targetSlides = docData.slides
+            .map((slide, idx) => ({ slide, idx: idx + 1 }))
+            .filter((item) => sparseSet.has(item.idx))
+            .map((item) => ({
+                index: item.idx,
+                title: item.slide.title,
+                summary: item.slide.summary || '',
+                bullets: item.slide.bullets,
+                level: item.slide.level || 1,
+                breadcrumb: item.slide.breadcrumb || '',
+                prevTitle: item.idx > 1 ? docData.slides[item.idx - 2]?.title || '' : '',
+                nextTitle: item.idx < docData.slides.length ? docData.slides[item.idx]?.title || '' : '',
+            }));
+
+        const rules = [
+            'Task: expand sparse PPT slides while staying faithful to source meaning.',
+            'Only process slide indexes provided in targetSlides.',
+            'Do not add unsupported facts, dates, numbers, or named entities.',
+            mode === 'creative'
+                ? 'Mode creative: make wording presentation-ready and add concise connective context.'
+                : 'Mode strict: keep wording very close to source meaning and avoid extra interpretation.',
+            'Each returned slide should contain 2-4 concise bullets.',
+            'Return valid JSON only with schema:',
+            '{"slides":[{"index":1,"summary":"string","bullets":["..."]}]}',
+        ].join('\n');
+
+        const payload = {
+            prompt: `${rules}\n\nTarget document:\n${JSON.stringify({ title: docData.title, targetSlides }, null, 2)}`,
+            messages: [
+                {
+                    role: 'system',
+                    content:
+                        'You are a presentation editor who expands sparse slides with grounded, concise content. Return JSON only.',
+                },
+                {
+                    role: 'user',
+                    content: `${rules}\n\nTarget document:\n${JSON.stringify({ title: docData.title, targetSlides }, null, 2)}`,
+                },
+            ],
+            temperature: mode === 'creative' ? 0.4 : 0.2,
+            useSearch: false,
+            model: this.model,
+            stream: false,
+            sessionId: `ppt-sparse-expand-${Date.now()}`,
+        };
+
+        try {
+            const response = await axios.post(`${this.baseUrl}/api/llm`, payload, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${token}`,
+                },
+                timeout: 120000,
+                proxy: false,
+                validateStatus: () => true,
+            });
+
+            if (response.status !== 200 || response.data?.success === false) {
+                console.warn(
+                    `Sparse expansion API failed: status=${response.status}, message=${response.data?.message || 'unknown'}`,
+                );
+                return new Map<number, SparseExpansionSlide>();
+            }
+
+            const rawText = this.extractModelText(response.data);
+            if (!rawText) {
+                return new Map<number, SparseExpansionSlide>();
+            }
+
+            return this.parseSparseExpansion(rawText);
+        } catch (error: any) {
+            console.warn('Sparse expansion request failed:', error?.message || error);
+            return new Map<number, SparseExpansionSlide>();
+        }
+    }
+
+    private parseSparseExpansion(raw: string): Map<number, SparseExpansionSlide> {
+        const mapped = new Map<number, SparseExpansionSlide>();
+        const jsonText = this.extractJsonBlock(raw);
+        if (!jsonText) {
+            return mapped;
+        }
+
+        try {
+            const parsed = JSON.parse(jsonText);
+            const slides = Array.isArray(parsed?.slides) ? parsed.slides : [];
+            slides.forEach((item: any) => {
+                const index = Number(item?.index);
+                if (!Number.isFinite(index) || index < 1) {
+                    return;
+                }
+
+                const bullets = this.normalizeBullets(Array.isArray(item?.bullets) ? item.bullets : []);
+                const summary = this.cleanText(item?.summary, 120);
+                if (bullets.length === 0 && !summary) {
+                    return;
+                }
+
+                mapped.set(index, {
+                    index,
+                    summary,
+                    bullets,
+                });
+            });
+        } catch {
+            return mapped;
+        }
+
+        return mapped;
+    }
+
+    private async generateSparseExpansionWithWorkerProxy(
+        docData: DocumentData,
+        sparseIndexes: number[],
+        mode: PlannerMode,
+    ): Promise<Map<number, SparseExpansionSlide>> {
+        const sparseSet = new Set<number>(sparseIndexes);
+        const targetSlides = docData.slides
+            .map((slide, idx) => ({ slide, idx: idx + 1 }))
+            .filter((item) => sparseSet.has(item.idx))
+            .map((item) => ({
+                index: item.idx,
+                title: item.slide.title,
+                summary: item.slide.summary || '',
+                bullets: item.slide.bullets,
+                level: item.slide.level || 1,
+                breadcrumb: item.slide.breadcrumb || '',
+                prevTitle: item.idx > 1 ? docData.slides[item.idx - 2]?.title || '' : '',
+                nextTitle: item.idx < docData.slides.length ? docData.slides[item.idx]?.title || '' : '',
+            }));
+
+        const rules = [
+            'Task: expand sparse PPT slides while staying faithful to source meaning.',
+            'Only process slide indexes provided in targetSlides.',
+            'Do not add unsupported facts, dates, numbers, or named entities.',
+            mode === 'creative'
+                ? 'Mode creative: make wording presentation-ready and add concise connective context.'
+                : 'Mode strict: keep wording very close to source meaning and avoid extra interpretation.',
+            'Each returned slide should contain 2-4 concise bullets.',
+            'Return valid JSON only with schema:',
+            '{"slides":[{"index":1,"summary":"string","bullets":["..."]}]}',
+        ].join('\n');
+
+        const prompt = `${rules}\n\nTarget document:\n${JSON.stringify({ title: docData.title, targetSlides }, null, 2)}`;
+        try {
+            const text = await this.callGeminiViaWorker(prompt, mode === 'creative' ? 0.4 : 0.2);
+            if (!text) {
+                return new Map<number, SparseExpansionSlide>();
+            }
+            return this.parseSparseExpansion(text);
+        } catch (error: any) {
+            console.warn('Sparse expansion worker proxy request failed:', error?.message || error);
+            return new Map<number, SparseExpansionSlide>();
+        }
+    }
+
+    private applySparseExpansion(
+        docData: DocumentData,
+        expandedByLlm: Map<number, SparseExpansionSlide>,
+        mode: PlannerMode,
+    ): DocumentData {
+        const slides = docData.slides.map((slide, idx) => {
+            const expansion = expandedByLlm.get(idx + 1);
+            if (!expansion) {
+                return slide;
+            }
+
+            const mergedBullets = this.normalizeBullets([...slide.bullets, ...expansion.bullets]);
+            const fallbackBullets =
+                mergedBullets.length >= 2
+                    ? mergedBullets
+                    : this.normalizeBullets([
+                          ...mergedBullets,
+                          `${slide.title}: key information`,
+                          mode === 'creative' ? `${slide.title}: narrative takeaway` : `${slide.title}: key takeaway`,
+                      ]);
+            const bullets = fallbackBullets.slice(0, 4);
+            const summarySeed =
+                expansion.summary ||
+                slide.summary ||
+                this.cleanText(`${slide.title}. ${bullets.slice(0, 2).join(' ')}`, 120);
+            const summary = this.selectSummary(summarySeed, bullets, slide.title);
+
+            return {
+                ...slide,
+                bullets,
+                summary,
+            };
+        });
+
+        return {
+            ...docData,
+            slides,
+        };
+    }
+
     private normalizeBullets(bullets: string[]): string[] {
         const unique = new Set<string>();
         const normalized: string[] = [];
@@ -490,6 +839,134 @@ export class PlannerService {
         const parts = breadcrumb.split('/').map((p) => p.trim()).filter(Boolean);
         if (parts.length === 0) return '';
         return this.cleanText(parts[parts.length - 1], 24);
+    }
+
+    private canUseWorkerProxy(): boolean {
+        return Boolean(this.workerUrl && this.workerApiKey);
+    }
+
+    private async callGeminiViaWorker(prompt: string, temperature: number): Promise<string> {
+        if (!this.canUseWorkerProxy()) {
+            return '';
+        }
+
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.workerApiKey}`;
+        const requestData = {
+            contents: [
+                {
+                    role: 'user',
+                    parts: [{ text: prompt }],
+                },
+            ],
+            generationConfig: {
+                temperature,
+            },
+        };
+
+        const response = await axios.post(
+            this.workerUrl,
+            {
+                url: apiUrl,
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                data: requestData,
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                timeout: 120000,
+                proxy: false,
+                validateStatus: () => true,
+            },
+        );
+
+        if (response.status !== 200) {
+            const body = this.stringifyErrorPayload(response.data);
+            throw new Error(`Worker proxy failed: status=${response.status}, body=${body}`);
+        }
+
+        const text = this.extractGeminiTextFromWorkerResponse(response.data);
+        return this.cleanText(text, 20000);
+    }
+
+    private extractGeminiTextFromWorkerResponse(payload: any): string {
+        if (!payload) return '';
+
+        if (typeof payload === 'string') {
+            try {
+                const parsed = JSON.parse(payload);
+                return this.extractGeminiTextFromWorkerResponse(parsed);
+            } catch {
+                return payload;
+            }
+        }
+
+        const fromParts = (root: any): string => {
+            const candidates = root?.candidates;
+            if (!Array.isArray(candidates) || candidates.length === 0) return '';
+            const first = candidates[0];
+            const parts = first?.content?.parts;
+            if (!Array.isArray(parts)) return '';
+            return parts
+                .map((part: any) => (typeof part?.text === 'string' ? part.text : ''))
+                .filter(Boolean)
+                .join('\n')
+                .trim();
+        };
+
+        const direct = fromParts(payload);
+        if (direct) return direct;
+
+        if (typeof payload?.data === 'string') {
+            return payload.data;
+        }
+
+        const nested = fromParts(payload?.data);
+        if (nested) return nested;
+
+        const outputText = payload?.output_text || payload?.data?.output_text;
+        if (typeof outputText === 'string') return outputText;
+
+        return '';
+    }
+
+    private loadExternalPlannerEnv(): Record<string, string> {
+        const envPath =
+            process.env.PLANNER_AIWORKFLOW_ENV_PATH || process.env.AIWORKFLOW_BACKEND_ENV_PATH || 'E:\\GitHubWorkSpace\\aiworkflow\\back-end\\.env';
+        if (!envPath || !fs.existsSync(envPath)) {
+            return {};
+        }
+
+        try {
+            const raw = fs.readFileSync(envPath, 'utf-8');
+            const map: Record<string, string> = {};
+            raw.split(/\r?\n/).forEach((line) => {
+                const trimmed = line.trim();
+                if (!trimmed || trimmed.startsWith('#')) return;
+                const eqIndex = trimmed.indexOf('=');
+                if (eqIndex <= 0) return;
+                const key = trimmed.slice(0, eqIndex).trim();
+                const value = trimmed.slice(eqIndex + 1).trim().replace(/^"|"$/g, '');
+                if (key) {
+                    map[key] = value;
+                }
+            });
+            return map;
+        } catch {
+            return {};
+        }
+    }
+
+    private stringifyErrorPayload(payload: any): string {
+        try {
+            if (typeof payload === 'string') return payload;
+            return JSON.stringify(payload);
+        } catch {
+            return String(payload);
+        }
     }
 
     private resolvePlannerMode(mode?: PlannerMode): PlannerMode {

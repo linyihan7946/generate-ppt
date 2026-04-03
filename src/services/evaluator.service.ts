@@ -9,9 +9,10 @@ import {
 } from '../types';
 
 export class EvaluatorService {
-    private readonly logicWeight = 0.4;
-    private readonly layoutWeight = 0.3;
-    private readonly imageWeight = 0.3;
+    private readonly logicWeight = 0.32;
+    private readonly layoutWeight = 0.24;
+    private readonly imageWeight = 0.24;
+    private readonly contentRichnessWeight = 0.2;
 
     evaluate(docData: DocumentData, outputPath?: string): QualityReport {
         const slides = docData.slides;
@@ -20,15 +21,16 @@ export class EvaluatorService {
         const logic = this.scoreLogic(docData, slides, metrics);
         const layout = this.scoreLayout(slides, metrics);
         const imageSemantics = this.scoreImageSemantics(slides, metrics);
+        const contentRichness = this.scoreContentRichness(slides, metrics);
 
         const overallScore = this.round(
-            logic.weightedScore + layout.weightedScore + imageSemantics.weightedScore,
+            logic.weightedScore + layout.weightedScore + imageSemantics.weightedScore + contentRichness.weightedScore,
             1,
         );
         const grade = this.getGrade(overallScore);
 
-        const keyFindings = this.collectKeyFindings(metrics, logic, layout, imageSemantics);
-        const nextActions = this.collectNextActions(logic, layout, imageSemantics);
+        const keyFindings = this.collectKeyFindings(metrics, logic, layout, imageSemantics, contentRichness);
+        const nextActions = this.collectNextActions(logic, layout, imageSemantics, contentRichness);
 
         return {
             version: 'v1',
@@ -41,6 +43,7 @@ export class EvaluatorService {
                 logic,
                 layout,
                 imageSemantics,
+                contentRichness,
             },
             metrics,
             keyFindings,
@@ -70,6 +73,8 @@ export class EvaluatorService {
         const imageCoverage = slideCount === 0 ? 0 : slideWithImageCount / slideCount;
         const totalBullets = slides.reduce((sum, s) => sum + s.bullets.length, 0);
         const avgBulletsPerSlide = slideCount === 0 ? 0 : totalBullets / slideCount;
+        const avgTextLengthPerSlide =
+            slideCount === 0 ? 0 : slides.reduce((sum, slide) => sum + this.totalTextLength(slide), 0) / slideCount;
 
         const allBullets = slides.flatMap((s) => s.bullets);
         const avgBulletLength =
@@ -84,6 +89,8 @@ export class EvaluatorService {
             (sum, slide) => sum + this.countIntraSlideRedundancyItems(slide),
             0,
         );
+        const sparseContentSlideCount = slides.filter((s) => this.isSparseContentSlide(s)).length;
+        const severeSparseContentSlideCount = slides.filter((s) => this.isSevereSparseContentSlide(s)).length;
         const overlaySlideCount = slides.filter((s) => s.layout !== 'image_only').length;
         const imageOnlySlideCount = slides.filter((s) => s.layout === 'image_only').length;
         const overflowRiskSlideCount = this.countOverflowRiskSlides(slides);
@@ -95,11 +102,14 @@ export class EvaluatorService {
             slideWithImageCount,
             imageCoverage: this.round(imageCoverage, 3),
             avgBulletsPerSlide: this.round(avgBulletsPerSlide, 2),
+            avgTextLengthPerSlide: this.round(avgTextLengthPerSlide, 2),
             avgBulletLength: this.round(avgBulletLength, 2),
             levelJumpViolations,
             duplicateTitleCount,
             redundantContentSlideCount,
             redundantContentItemCount,
+            sparseContentSlideCount,
+            severeSparseContentSlideCount,
             overlaySlideCount,
             imageOnlySlideCount,
             overflowRiskSlideCount,
@@ -305,6 +315,62 @@ export class EvaluatorService {
         };
     }
 
+    private scoreContentRichness(slides: SlideContent[], metrics: QualityMetrics): QualityDimensionScore {
+        const evidence: string[] = [];
+        const issues: string[] = [];
+        const recommendations: string[] = [];
+        let score = 100;
+
+        evidence.push(`Average text length per slide: ${metrics.avgTextLengthPerSlide}.`);
+        evidence.push(`Sparse slides: ${metrics.sparseContentSlideCount}, severe sparse slides: ${metrics.severeSparseContentSlideCount}.`);
+
+        if (metrics.severeSparseContentSlideCount > 0) {
+            const penalty = Math.min(42, metrics.severeSparseContentSlideCount * 12);
+            score -= penalty;
+            issues.push(`${metrics.severeSparseContentSlideCount} slides are severely sparse (very short text or empty bullets).`);
+            recommendations.push('Expand severely sparse slides to at least 2 concise bullets with an explicit takeaway.');
+        }
+
+        if (metrics.sparseContentSlideCount > 0) {
+            const penalty = Math.min(30, metrics.sparseContentSlideCount * 6);
+            score -= penalty;
+            issues.push(`${metrics.sparseContentSlideCount} slides are content-sparse and may feel under-explained.`);
+            recommendations.push('Use model-assisted expansion for sparse slides while keeping facts grounded in source content.');
+        }
+
+        if (metrics.avgBulletsPerSlide < 1.8) {
+            const penalty = this.round((1.8 - metrics.avgBulletsPerSlide) * 12, 1);
+            score -= Math.min(18, penalty);
+            issues.push('Average bullets per slide is too low for stable narrative depth.');
+            recommendations.push('Keep most slides around 2-5 bullets unless it is a transition or cover slide.');
+        }
+
+        if (metrics.avgTextLengthPerSlide < 70) {
+            const penalty = this.round((70 - metrics.avgTextLengthPerSlide) * 0.25, 1);
+            score -= Math.min(16, penalty);
+            issues.push('Average text length per slide is low and weakens information density.');
+            recommendations.push('Add concise context and implications to low-information slides.');
+        } else {
+            evidence.push('Average text length is sufficient for presentation comprehension.');
+        }
+
+        if (metrics.sparseContentSlideCount === 0 && metrics.avgBulletsPerSlide >= 2 && metrics.avgBulletsPerSlide <= 5) {
+            score += 4;
+            evidence.push('No sparse slide detected and bullet density is balanced.');
+        }
+
+        const finalScore = this.clamp(this.round(score, 1), 0, 100);
+        return {
+            name: '\u5185\u5bb9\u5145\u5b9e\u5ea6',
+            score: finalScore,
+            weight: this.contentRichnessWeight,
+            weightedScore: this.round(finalScore * this.contentRichnessWeight, 1),
+            evidence,
+            issues,
+            recommendations,
+        };
+    }
+
     private countLevelJumpViolations(slides: SlideContent[]): number {
         let violations = 0;
         for (let i = 1; i < slides.length; i++) {
@@ -480,17 +546,35 @@ export class EvaluatorService {
         );
     }
 
+    private isSparseContentSlide(slide: SlideContent): boolean {
+        const bulletCount = slide.bullets.filter((b) => this.cleanText(b).length > 0).length;
+        const textLength = this.totalTextLength(slide);
+        const hasSummary = this.cleanText(slide.summary || '').length > 0;
+
+        return (bulletCount <= 1 && textLength < 90) || (!hasSummary && bulletCount === 0);
+    }
+
+    private isSevereSparseContentSlide(slide: SlideContent): boolean {
+        const bulletCount = slide.bullets.filter((b) => this.cleanText(b).length > 0).length;
+        const textLength = this.totalTextLength(slide);
+        const titleLength = this.cleanText(slide.title).length;
+
+        return bulletCount === 0 || (bulletCount <= 1 && textLength < 55 && titleLength < 28);
+    }
+
     private collectKeyFindings(
         metrics: QualityMetrics,
         logic: QualityDimensionScore,
         layout: QualityDimensionScore,
         imageSemantics: QualityDimensionScore,
+        contentRichness: QualityDimensionScore,
     ): string[] {
         const findings: string[] = [];
         findings.push(`Overall image coverage: ${(metrics.imageCoverage * 100).toFixed(1)}%.`);
         findings.push(`Prompt alignment average: ${(metrics.promptAlignmentAvg * 100).toFixed(1)}%.`);
+        findings.push(`Sparse content slides: ${metrics.sparseContentSlideCount} (severe: ${metrics.severeSparseContentSlideCount}).`);
         findings.push(
-            `Dimension scores -> Logic: ${logic.score}, Layout: ${layout.score}, Image: ${imageSemantics.score}.`,
+            `Dimension scores -> Logic: ${logic.score}, Layout: ${layout.score}, Image: ${imageSemantics.score}, Richness: ${contentRichness.score}.`,
         );
         findings.push(
             `Same-slide repeated content items: ${metrics.redundantContentItemCount} on ${metrics.redundantContentSlideCount} slides.`,
@@ -546,6 +630,9 @@ export class EvaluatorService {
         );
         lines.push(
             `| ${report.dimensions.imageSemantics.name} | ${report.dimensions.imageSemantics.score} | ${report.dimensions.imageSemantics.weight} | ${report.dimensions.imageSemantics.weightedScore} |`,
+        );
+        lines.push(
+            `| ${report.dimensions.contentRichness.name} | ${report.dimensions.contentRichness.score} | ${report.dimensions.contentRichness.weight} | ${report.dimensions.contentRichness.weightedScore} |`,
         );
         lines.push('');
         lines.push('## Metrics');

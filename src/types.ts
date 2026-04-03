@@ -40,11 +40,14 @@ export interface QualityMetrics {
     slideWithImageCount: number;
     imageCoverage: number;
     avgBulletsPerSlide: number;
+    avgTextLengthPerSlide: number;
     avgBulletLength: number;
     levelJumpViolations: number;
     duplicateTitleCount: number;
     redundantContentSlideCount: number;
     redundantContentItemCount: number;
+    sparseContentSlideCount: number;
+    severeSparseContentSlideCount: number;
     overlaySlideCount: number;
     imageOnlySlideCount: number;
     overflowRiskSlideCount: number;
@@ -63,6 +66,7 @@ export interface QualityReport {
         logic: QualityDimensionScore;
         layout: QualityDimensionScore;
         imageSemantics: QualityDimensionScore;
+        contentRichness: QualityDimensionScore;
     };
     metrics: QualityMetrics;
     keyFindings: string[];
