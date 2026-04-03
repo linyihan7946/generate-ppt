@@ -72,10 +72,12 @@ Each generation can output:
 
 Scoring dimensions:
 
-- Content logic & reasonableness
-- Layout aesthetics
-- Image semantic alignment
-- Content richness (sparse slide penalty)
+- Content logic (hierarchy/transition/title quality/redundancy checks)
+- Layout quality (visual coverage/overflow/layout diversity)
+- Image semantic alignment (prompt coverage/alignment/fallback penalty)
+- Content richness (sparse slide and low-information penalty)
+- Audience fit (takeaway density/readability/final-slide action cue)
+- Consistency (title style/transition consistency/cross-slide completeness gap)
 
 ## Run Web server
 

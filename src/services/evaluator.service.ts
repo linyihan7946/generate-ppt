@@ -9,10 +9,12 @@ import {
 } from '../types';
 
 export class EvaluatorService {
-    private readonly logicWeight = 0.32;
-    private readonly layoutWeight = 0.24;
-    private readonly imageWeight = 0.24;
+    private readonly logicWeight = 0.2;
+    private readonly layoutWeight = 0.16;
+    private readonly imageWeight = 0.14;
     private readonly contentRichnessWeight = 0.2;
+    private readonly audienceFitWeight = 0.16;
+    private readonly consistencyWeight = 0.14;
 
     evaluate(docData: DocumentData, outputPath?: string): QualityReport {
         const slides = docData.slides;
@@ -22,32 +24,52 @@ export class EvaluatorService {
         const layout = this.scoreLayout(slides, metrics);
         const imageSemantics = this.scoreImageSemantics(slides, metrics);
         const contentRichness = this.scoreContentRichness(slides, metrics);
+        const audienceFit = this.scoreAudienceFit(slides, metrics);
+        const consistency = this.scoreConsistency(slides, metrics);
 
         const overallScore = this.round(
-            logic.weightedScore + layout.weightedScore + imageSemantics.weightedScore + contentRichness.weightedScore,
+            logic.weightedScore +
+                layout.weightedScore +
+                imageSemantics.weightedScore +
+                contentRichness.weightedScore +
+                audienceFit.weightedScore +
+                consistency.weightedScore,
             1,
         );
-        const grade = this.getGrade(overallScore);
-
-        const keyFindings = this.collectKeyFindings(metrics, logic, layout, imageSemantics, contentRichness);
-        const nextActions = this.collectNextActions(logic, layout, imageSemantics, contentRichness);
 
         return {
-            version: 'v1',
+            version: 'v2',
             generatedAt: new Date().toISOString(),
             title: docData.title,
             outputPath,
             overallScore,
-            grade,
+            grade: this.getGrade(overallScore),
             dimensions: {
                 logic,
                 layout,
                 imageSemantics,
                 contentRichness,
+                audienceFit,
+                consistency,
             },
             metrics,
-            keyFindings,
-            nextActions,
+            keyFindings: this.collectKeyFindings(
+                metrics,
+                logic,
+                layout,
+                imageSemantics,
+                contentRichness,
+                audienceFit,
+                consistency,
+            ),
+            nextActions: this.collectNextActions(
+                logic,
+                layout,
+                imageSemantics,
+                contentRichness,
+                audienceFit,
+                consistency,
+            ),
         };
     }
 
@@ -63,145 +85,124 @@ export class EvaluatorService {
 
         fs.writeFileSync(jsonPath, JSON.stringify(report, null, 2), 'utf-8');
         fs.writeFileSync(markdownPath, this.toMarkdown(report), 'utf-8');
-
         return { jsonPath, markdownPath };
     }
 
     private computeMetrics(slides: SlideContent[]): QualityMetrics {
         const slideCount = slides.length;
         const slideWithImageCount = slides.filter((s) => s.images.length > 0).length;
+        const slidesWithSummaryCount = slides.filter((s) => this.cleanText(s.summary || '').length > 0).length;
+        const slidesWithPromptCount = slides.filter((s) => this.cleanText(s.imagePrompt || '').length > 0).length;
         const imageCoverage = slideCount === 0 ? 0 : slideWithImageCount / slideCount;
+        const summaryCoverage = slideCount === 0 ? 0 : slidesWithSummaryCount / slideCount;
+        const promptCoverage = slideCount === 0 ? 0 : slidesWithPromptCount / slideCount;
         const totalBullets = slides.reduce((sum, s) => sum + s.bullets.length, 0);
         const avgBulletsPerSlide = slideCount === 0 ? 0 : totalBullets / slideCount;
         const avgTextLengthPerSlide =
-            slideCount === 0 ? 0 : slides.reduce((sum, slide) => sum + this.totalTextLength(slide), 0) / slideCount;
-
+            slideCount === 0 ? 0 : slides.reduce((sum, s) => sum + this.totalTextLength(s), 0) / slideCount;
         const allBullets = slides.flatMap((s) => s.bullets);
         const avgBulletLength =
             allBullets.length === 0
                 ? 0
                 : allBullets.reduce((sum, b) => sum + this.cleanText(b).length, 0) / allBullets.length;
 
-        const levelJumpViolations = this.countLevelJumpViolations(slides);
-        const duplicateTitleCount = this.countDuplicateTitles(slides);
-        const redundantContentSlideCount = slides.filter((s) => this.countIntraSlideRedundancyItems(s) > 0).length;
-        const redundantContentItemCount = slides.reduce(
-            (sum, slide) => sum + this.countIntraSlideRedundancyItems(slide),
-            0,
-        );
-        const sparseContentSlideCount = slides.filter((s) => this.isSparseContentSlide(s)).length;
-        const severeSparseContentSlideCount = slides.filter((s) => this.isSevereSparseContentSlide(s)).length;
         const overlaySlideCount = slides.filter((s) => s.layout !== 'image_only').length;
         const imageOnlySlideCount = slides.filter((s) => s.layout === 'image_only').length;
-        const overflowRiskSlideCount = this.countOverflowRiskSlides(slides);
-        const promptAlignmentAvg = this.averagePromptAlignment(slides);
-        const fallbackImageCount = slides.filter((s) => s.imageSource === 'ai_fallback' || s.imageSource === 'placeholder').length;
+        const dominantLayoutRatio = slideCount === 0 ? 0 : Math.max(overlaySlideCount, imageOnlySlideCount) / slideCount;
 
         return {
             slideCount,
             slideWithImageCount,
+            slidesWithSummaryCount,
+            slidesWithPromptCount,
             imageCoverage: this.round(imageCoverage, 3),
+            summaryCoverage: this.round(summaryCoverage, 3),
+            promptCoverage: this.round(promptCoverage, 3),
             avgBulletsPerSlide: this.round(avgBulletsPerSlide, 2),
             avgTextLengthPerSlide: this.round(avgTextLengthPerSlide, 2),
             avgBulletLength: this.round(avgBulletLength, 2),
-            levelJumpViolations,
-            duplicateTitleCount,
-            redundantContentSlideCount,
-            redundantContentItemCount,
-            sparseContentSlideCount,
-            severeSparseContentSlideCount,
+            levelJumpViolations: this.countLevelJumpViolations(slides),
+            duplicateTitleCount: this.countDuplicateTitles(slides),
+            genericTitleCount: this.countGenericTitles(slides),
+            weakTransitionCount: this.countWeakTransitions(slides),
+            actionCueSlideCount: this.countActionCueSlides(slides),
+            redundantContentSlideCount: slides.filter((s) => this.countIntraSlideRedundancyItems(s) > 0).length,
+            redundantContentItemCount: slides.reduce((sum, s) => sum + this.countIntraSlideRedundancyItems(s), 0),
+            sparseContentSlideCount: slides.filter((s) => this.isSparseContentSlide(s)).length,
+            severeSparseContentSlideCount: slides.filter((s) => this.isSevereSparseContentSlide(s)).length,
             overlaySlideCount,
             imageOnlySlideCount,
-            overflowRiskSlideCount,
-            promptAlignmentAvg: this.round(promptAlignmentAvg, 3),
-            fallbackImageCount,
+            dominantLayoutRatio: this.round(dominantLayoutRatio, 3),
+            overflowRiskSlideCount: this.countOverflowRiskSlides(slides),
+            promptAlignmentAvg: this.round(this.averagePromptAlignment(slides), 3),
+            fallbackImageCount: slides.filter((s) => s.imageSource === 'ai_fallback' || s.imageSource === 'placeholder')
+                .length,
         };
     }
 
-    private scoreLogic(
-        docData: DocumentData,
-        slides: SlideContent[],
-        metrics: QualityMetrics,
-    ): QualityDimensionScore {
+    private scoreLogic(docData: DocumentData, slides: SlideContent[], metrics: QualityMetrics): QualityDimensionScore {
         const evidence: string[] = [];
         const issues: string[] = [];
         const recommendations: string[] = [];
         let score = 100;
 
-        evidence.push(`Total slides: ${metrics.slideCount}`);
-        evidence.push(`Average bullets per slide: ${metrics.avgBulletsPerSlide}`);
-        evidence.push(`Intra-slide repeated-content items: ${metrics.redundantContentItemCount}`);
+        evidence.push(`Average bullets: ${metrics.avgBulletsPerSlide}`);
+        evidence.push(`Level jumps: ${metrics.levelJumpViolations}`);
+        evidence.push(`Weak transitions: ${metrics.weakTransitionCount}`);
 
         const emptyTitleCount = slides.filter((s) => this.cleanText(s.title).length === 0).length;
         if (emptyTitleCount > 0) {
             score -= emptyTitleCount * 10;
             issues.push(`${emptyTitleCount} slides have empty titles.`);
-            recommendations.push('Ensure each slide has a concise and explicit title.');
+            recommendations.push('Ensure every slide has a concise title.');
         }
-
         if (metrics.duplicateTitleCount > 0) {
             score -= metrics.duplicateTitleCount * 4;
-            issues.push(`${metrics.duplicateTitleCount} duplicate titles detected.`);
-            recommendations.push("Rewrite repeated titles to highlight each slide's unique point.");
+            issues.push(`${metrics.duplicateTitleCount} duplicate slide titles detected.`);
+            recommendations.push('Rename duplicate titles to highlight unique points.');
         }
-
-        if (metrics.redundantContentItemCount > 0) {
-            const penalty = Math.min(
-                18,
-                metrics.redundantContentSlideCount * 4 + metrics.redundantContentItemCount * 2,
-            );
-            score -= penalty;
-            issues.push(
-                `${metrics.redundantContentItemCount} repeated content items detected on ${metrics.redundantContentSlideCount} slides.`,
-            );
-            recommendations.push(
-                'Reduce same-slide repetition: avoid repeating summary in bullets and remove duplicate bullet points.',
-            );
-        } else {
-            evidence.push('No obvious same-slide repeated content detected.');
+        if (metrics.genericTitleCount > 0) {
+            score -= metrics.genericTitleCount * 3;
+            issues.push(`${metrics.genericTitleCount} titles are generic.`);
+            recommendations.push('Use specific, topic-driven title wording.');
         }
-
         if (metrics.levelJumpViolations > 0) {
             score -= metrics.levelJumpViolations * 6;
-            issues.push(`${metrics.levelJumpViolations} hierarchy jumps detected (level gap > 1).`);
-            recommendations.push('Smooth hierarchy transitions to keep narrative progression coherent.');
+            issues.push(`${metrics.levelJumpViolations} hierarchy jumps detected.`);
+            recommendations.push('Keep neighboring levels close to maintain narrative continuity.');
         }
-
-        const sparseTopLevelCount = slides.filter(
-            (s) => (s.level || 1) <= 2 && s.bullets.length === 0 && !s.summary,
-        ).length;
-        if (sparseTopLevelCount > 0) {
-            score -= sparseTopLevelCount * 5;
-            issues.push(`${sparseTopLevelCount} key slides have weak or empty content.`);
-            recommendations.push('Add at least 2 concise bullets for high-level slides.');
+        if (metrics.weakTransitionCount > 0) {
+            score -= Math.min(20, metrics.weakTransitionCount * 4);
+            issues.push(`${metrics.weakTransitionCount} transitions appear disconnected.`);
+            recommendations.push('Add transitional context between neighboring slides.');
+        } else if (slides.length > 1) {
+            evidence.push('Slide-to-slide continuity looks stable.');
         }
-
-        const longBulletSlides = slides.filter((s) => s.bullets.some((b) => this.cleanText(b).length > 90)).length;
-        if (longBulletSlides > 0) {
-            score -= longBulletSlides * 3;
-            issues.push(`${longBulletSlides} slides contain overly long bullet text.`);
-            recommendations.push('Split long bullet sentences into short factual points.');
+        if (metrics.redundantContentItemCount > 0) {
+            score -= Math.min(18, metrics.redundantContentSlideCount * 3 + metrics.redundantContentItemCount * 2);
+            issues.push(`Repeated content items: ${metrics.redundantContentItemCount}.`);
+            recommendations.push('Remove duplicate bullets and repeated summary text.');
+        } else {
+            evidence.push('No obvious same-slide repetition found.');
         }
-
         if (metrics.avgBulletsPerSlide >= 2 && metrics.avgBulletsPerSlide <= 5) {
-            score += 4;
-            evidence.push('Bullet density is in an acceptable range (2-5).');
+            score += 3;
+            evidence.push('Bullet density stays in the recommended range (2-5).');
         } else {
+            score -= 4;
             issues.push('Bullet density is outside recommended range (2-5).');
-            recommendations.push('Keep each slide around 2-5 bullets for better comprehension.');
+            recommendations.push('Keep most slides around 2-5 bullets.');
         }
-
-        if (this.cleanText(docData.title).length > 0) {
-            evidence.push('Presentation title is present.');
-        } else {
+        if (this.cleanText(docData.title).length === 0) {
             score -= 8;
-            issues.push('Presentation title is missing.');
-            recommendations.push('Provide a clear presentation title.');
+            issues.push('Deck title is missing.');
+            recommendations.push('Provide a clear deck title to anchor the story.');
         }
 
-        const finalScore = this.clamp(this.round(score, 1), 0, 100);
+        const boundedScore = this.clamp(this.round(score, 1), 0, 100);
+        const finalScore = issues.length > 0 ? Math.min(boundedScore, 98) : boundedScore;
         return {
-            name: '\u5185\u5bb9\u903b\u8f91\u6027\u548c\u5408\u7406\u6027',
+            name: 'Content Logic',
             score: finalScore,
             weight: this.logicWeight,
             weightedScore: this.round(finalScore * this.logicWeight, 1),
@@ -217,43 +218,46 @@ export class EvaluatorService {
         const recommendations: string[] = [];
         let score = 100;
 
-        evidence.push(
-            `Overlay slides: ${metrics.overlaySlideCount}, image-only slides: ${metrics.imageOnlySlideCount}.`,
-        );
         evidence.push(`Image coverage: ${(metrics.imageCoverage * 100).toFixed(1)}%.`);
+        evidence.push(`Layout dominance: ${(metrics.dominantLayoutRatio * 100).toFixed(1)}%.`);
 
         const noImageSlides = metrics.slideCount - metrics.slideWithImageCount;
         if (noImageSlides > 0) {
-            score -= noImageSlides * 10;
-            issues.push(`${noImageSlides} slides are missing images.`);
-            recommendations.push('Ensure each content slide has one visual to keep style consistency.');
+            score -= noImageSlides * 8;
+            issues.push(`${noImageSlides} slides have no image.`);
+            recommendations.push('Add one image per content slide whenever possible.');
         }
-
         if (metrics.overflowRiskSlideCount > 0) {
             score -= metrics.overflowRiskSlideCount * 6;
-            issues.push(`${metrics.overflowRiskSlideCount} slides have high text overflow risk.`);
-            recommendations.push('Reduce text density or switch those slides to image-only layout.');
+            issues.push(`${metrics.overflowRiskSlideCount} slides have overflow risk.`);
+            recommendations.push('Reduce text density or split long slides.');
         } else {
-            evidence.push('No high overflow risk slide detected.');
+            score += 2;
+            evidence.push('No high-risk text overflow slide detected.');
+        }
+        if (metrics.dominantLayoutRatio > 0.9 && metrics.slideCount >= 6) {
+            score -= this.round((metrics.dominantLayoutRatio - 0.9) * 60, 1);
+            issues.push('Layout style is too repetitive.');
+            recommendations.push('Mix overlay and image-only layouts for better rhythm.');
+        } else if (metrics.slideCount >= 6) {
+            evidence.push('Layout variation is acceptable.');
         }
 
-        const overlayDenseSlides = slides.filter(
-            (s) => s.layout !== 'image_only' && this.totalTextLength(s) > 280,
-        ).length;
-        if (overlayDenseSlides > 0) {
-            score -= overlayDenseSlides * 4;
-            issues.push(`${overlayDenseSlides} overlay slides are text-heavy.`);
-            recommendations.push('For dense content, split into multiple slides or use visual summary.');
+        const denseOverlaySlides = slides.filter((s) => s.layout !== 'image_only' && this.totalTextLength(s) > 280).length;
+        if (denseOverlaySlides > 0) {
+            score -= denseOverlaySlides * 4;
+            issues.push(`${denseOverlaySlides} overlay slides are text-heavy.`);
+            recommendations.push('Switch dense slides to image-only or shorten text.');
         }
-
         if (metrics.imageCoverage >= 0.95) {
-            score += 5;
-            evidence.push('Visual coverage is high and close to template style.');
+            score += 4;
+            evidence.push('Visual coverage is strong.');
         }
 
-        const finalScore = this.clamp(this.round(score, 1), 0, 100);
+        const boundedScore = this.clamp(this.round(score, 1), 0, 100);
+        const finalScore = issues.length > 0 ? Math.min(boundedScore, 98) : boundedScore;
         return {
-            name: '\u6392\u7248\u7f8e\u89c2\u6027',
+            name: 'Layout Quality',
             score: finalScore,
             weight: this.layoutWeight,
             weightedScore: this.round(finalScore * this.layoutWeight, 1),
@@ -269,43 +273,46 @@ export class EvaluatorService {
         const recommendations: string[] = [];
         let score = 100;
 
-        evidence.push(`Average prompt alignment: ${(metrics.promptAlignmentAvg * 100).toFixed(1)}%.`);
-        evidence.push(`Fallback/placeholder images: ${metrics.fallbackImageCount}.`);
+        evidence.push(`Prompt coverage: ${(metrics.promptCoverage * 100).toFixed(1)}%.`);
+        evidence.push(`Prompt alignment: ${(metrics.promptAlignmentAvg * 100).toFixed(1)}%.`);
+        evidence.push(`Fallback images: ${metrics.fallbackImageCount}.`);
 
-        const missingPromptSlides = slides.filter((s) => !this.cleanText(s.imagePrompt || '')).length;
+        const missingPromptSlides = metrics.slideCount - metrics.slidesWithPromptCount;
         if (missingPromptSlides > 0) {
             score -= missingPromptSlides * 5;
-            issues.push(`${missingPromptSlides} slides are missing explicit image prompts.`);
-            recommendations.push('Provide imagePrompt for every slide to improve semantic control.');
+            issues.push(`${missingPromptSlides} slides are missing image prompts.`);
+            recommendations.push('Provide imagePrompt for each slide.');
         }
-
         const lowAlignSlides = slides.filter((s) => this.promptAlignment(s) < 0.2).length;
         if (lowAlignSlides > 0) {
             score -= lowAlignSlides * 4;
-            issues.push(`${lowAlignSlides} slides have weak text-image semantic alignment.`);
-            recommendations.push('Rewrite image prompts using title + core bullets + context keywords.');
+            issues.push(`${lowAlignSlides} slides show weak image-text alignment.`);
+            recommendations.push('Use title/summary/bullet keywords in prompts.');
         }
-
         if (metrics.fallbackImageCount > 0) {
             score -= metrics.fallbackImageCount * 6;
-            issues.push(`${metrics.fallbackImageCount} slides used fallback/placeholder images.`);
-            recommendations.push('Improve prompt safety and API reliability to reduce fallback rate.');
+            issues.push(`${metrics.fallbackImageCount} slides used fallback images.`);
+            recommendations.push('Improve prompt robustness and retry strategy.');
         }
-
+        if (metrics.promptCoverage < 0.85) {
+            score -= this.round((0.85 - metrics.promptCoverage) * 40, 1);
+            issues.push('Prompt coverage is below 85%.');
+            recommendations.push('Keep prompt coverage above 85%.');
+        }
         if (metrics.imageCoverage < 0.9) {
-            score -= (1 - metrics.imageCoverage) * 30;
-            issues.push('Insufficient image coverage affects semantic expression.');
-            recommendations.push('Ensure each slide has at least one generated or original image.');
+            score -= this.round((0.9 - metrics.imageCoverage) * 40, 1);
+            issues.push('Image coverage is below 90%.');
+            recommendations.push('Increase image generation coverage.');
         }
-
         if (metrics.promptAlignmentAvg >= 0.45) {
-            score += 5;
-            evidence.push('Prompt-to-content alignment is generally good.');
+            score += 4;
+            evidence.push('Prompt semantics generally align with content.');
         }
 
-        const finalScore = this.clamp(this.round(score, 1), 0, 100);
+        const boundedScore = this.clamp(this.round(score, 1), 0, 100);
+        const finalScore = issues.length > 0 ? Math.min(boundedScore, 98) : boundedScore;
         return {
-            name: '\u914d\u56fe\u8868\u8fbe\u51c6\u786e\u6027',
+            name: 'Image Semantics',
             score: finalScore,
             weight: this.imageWeight,
             weightedScore: this.round(finalScore * this.imageWeight, 1),
@@ -315,53 +322,48 @@ export class EvaluatorService {
         };
     }
 
-    private scoreContentRichness(slides: SlideContent[], metrics: QualityMetrics): QualityDimensionScore {
+    private scoreContentRichness(_: SlideContent[], metrics: QualityMetrics): QualityDimensionScore {
         const evidence: string[] = [];
         const issues: string[] = [];
         const recommendations: string[] = [];
         let score = 100;
 
-        evidence.push(`Average text length per slide: ${metrics.avgTextLengthPerSlide}.`);
-        evidence.push(`Sparse slides: ${metrics.sparseContentSlideCount}, severe sparse slides: ${metrics.severeSparseContentSlideCount}.`);
+        evidence.push(`Average text length: ${metrics.avgTextLengthPerSlide}.`);
+        evidence.push(`Sparse slides: ${metrics.sparseContentSlideCount} (severe: ${metrics.severeSparseContentSlideCount}).`);
+        evidence.push(`Summary coverage: ${(metrics.summaryCoverage * 100).toFixed(1)}%.`);
 
         if (metrics.severeSparseContentSlideCount > 0) {
-            const penalty = Math.min(42, metrics.severeSparseContentSlideCount * 12);
-            score -= penalty;
-            issues.push(`${metrics.severeSparseContentSlideCount} slides are severely sparse (very short text or empty bullets).`);
-            recommendations.push('Expand severely sparse slides to at least 2 concise bullets with an explicit takeaway.');
+            score -= Math.min(45, metrics.severeSparseContentSlideCount * 11);
+            issues.push(`${metrics.severeSparseContentSlideCount} slides are severely sparse.`);
+            recommendations.push('Expand severe sparse slides to at least 2 bullets + a takeaway.');
         }
-
         if (metrics.sparseContentSlideCount > 0) {
-            const penalty = Math.min(30, metrics.sparseContentSlideCount * 6);
-            score -= penalty;
-            issues.push(`${metrics.sparseContentSlideCount} slides are content-sparse and may feel under-explained.`);
-            recommendations.push('Use model-assisted expansion for sparse slides while keeping facts grounded in source content.');
+            score -= Math.min(30, metrics.sparseContentSlideCount * 6);
+            issues.push(`${metrics.sparseContentSlideCount} slides are content-sparse.`);
+            recommendations.push('Use model expansion for sparse slides while preserving source facts.');
         }
-
         if (metrics.avgBulletsPerSlide < 1.8) {
-            const penalty = this.round((1.8 - metrics.avgBulletsPerSlide) * 12, 1);
-            score -= Math.min(18, penalty);
-            issues.push('Average bullets per slide is too low for stable narrative depth.');
-            recommendations.push('Keep most slides around 2-5 bullets unless it is a transition or cover slide.');
+            score -= Math.min(18, this.round((1.8 - metrics.avgBulletsPerSlide) * 12, 1));
+            issues.push('Average bullets per slide is too low.');
+            recommendations.push('Keep average bullets close to 2-5.');
         }
-
         if (metrics.avgTextLengthPerSlide < 70) {
-            const penalty = this.round((70 - metrics.avgTextLengthPerSlide) * 0.25, 1);
-            score -= Math.min(16, penalty);
-            issues.push('Average text length per slide is low and weakens information density.');
-            recommendations.push('Add concise context and implications to low-information slides.');
+            score -= Math.min(16, this.round((70 - metrics.avgTextLengthPerSlide) * 0.25, 1));
+            issues.push('Average text length is too short.');
+            recommendations.push('Add concise context to low-information slides.');
+        }
+        if (metrics.summaryCoverage < 0.65 && metrics.slideCount >= 5) {
+            score -= Math.min(12, this.round((0.65 - metrics.summaryCoverage) * 30, 1));
+            issues.push('Summary coverage is low.');
+            recommendations.push('Add summary lines to most non-cover slides.');
         } else {
-            evidence.push('Average text length is sufficient for presentation comprehension.');
+            evidence.push('Summary coverage is acceptable.');
         }
 
-        if (metrics.sparseContentSlideCount === 0 && metrics.avgBulletsPerSlide >= 2 && metrics.avgBulletsPerSlide <= 5) {
-            score += 4;
-            evidence.push('No sparse slide detected and bullet density is balanced.');
-        }
-
-        const finalScore = this.clamp(this.round(score, 1), 0, 100);
+        const boundedScore = this.clamp(this.round(score, 1), 0, 100);
+        const finalScore = issues.length > 0 ? Math.min(boundedScore, 98) : boundedScore;
         return {
-            name: '\u5185\u5bb9\u5145\u5b9e\u5ea6',
+            name: 'Content Richness',
             score: finalScore,
             weight: this.contentRichnessWeight,
             weightedScore: this.round(finalScore * this.contentRichnessWeight, 1),
@@ -371,9 +373,132 @@ export class EvaluatorService {
         };
     }
 
+    private scoreAudienceFit(slides: SlideContent[], metrics: QualityMetrics): QualityDimensionScore {
+        const evidence: string[] = [];
+        const issues: string[] = [];
+        const recommendations: string[] = [];
+        let score = 100;
+
+        const actionCueCoverage = metrics.slideCount === 0 ? 0 : metrics.actionCueSlideCount / metrics.slideCount;
+        evidence.push(`Action-cue coverage: ${(actionCueCoverage * 100).toFixed(1)}%.`);
+        evidence.push(`Average bullet length: ${metrics.avgBulletLength}.`);
+
+        if (actionCueCoverage < 0.15 && metrics.slideCount >= 6) {
+            score -= Math.min(18, this.round((0.15 - actionCueCoverage) * 80, 1));
+            issues.push('Action/takeaway guidance is too sparse.');
+            recommendations.push('Add takeaway language on milestone slides.');
+        }
+        if (metrics.avgBulletLength > 45) {
+            score -= 8;
+            issues.push('Bullets are too long for quick reading.');
+            recommendations.push('Split long bullets into shorter points.');
+        } else if (metrics.avgBulletLength > 0 && metrics.avgBulletLength < 8) {
+            score -= 6;
+            issues.push('Bullets are too short and under-informative.');
+            recommendations.push('Extend very short bullets with context.');
+        }
+        const longBulletSlides = slides.filter((s) => s.bullets.some((b) => this.cleanText(b).length > 90)).length;
+        if (longBulletSlides > 0) {
+            score -= Math.min(14, longBulletSlides * 3);
+            issues.push(`${longBulletSlides} slides contain very long bullet sentences.`);
+            recommendations.push('Use speech-friendly short bullets.');
+        }
+        if (metrics.summaryCoverage < 0.55 && metrics.slideCount >= 5) {
+            score -= 8;
+            issues.push('Low summary coverage hurts first-glance readability.');
+            recommendations.push('Improve summary coverage for audience orientation.');
+        }
+        const lastSlide = slides[slides.length - 1];
+        if (lastSlide && !this.hasActionCue(this.collectSlideText(lastSlide))) {
+            score -= 5;
+            issues.push('Last slide lacks a clear takeaway/next-step cue.');
+            recommendations.push('Add a closing takeaway on the final slide.');
+        }
+
+        const boundedScore = this.clamp(this.round(score, 1), 0, 100);
+        const finalScore = issues.length > 0 ? Math.min(boundedScore, 98) : boundedScore;
+        return {
+            name: 'Audience Fit',
+            score: finalScore,
+            weight: this.audienceFitWeight,
+            weightedScore: this.round(finalScore * this.audienceFitWeight, 1),
+            evidence,
+            issues,
+            recommendations,
+        };
+    }
+
+    private scoreConsistency(_: SlideContent[], metrics: QualityMetrics): QualityDimensionScore {
+        const evidence: string[] = [];
+        const issues: string[] = [];
+        const recommendations: string[] = [];
+        let score = 100;
+
+        evidence.push(`Duplicate titles: ${metrics.duplicateTitleCount}.`);
+        evidence.push(`Generic titles: ${metrics.genericTitleCount}.`);
+        evidence.push(`Weak transitions: ${metrics.weakTransitionCount}.`);
+
+        if (metrics.duplicateTitleCount > 0) {
+            score -= metrics.duplicateTitleCount * 4;
+            issues.push('Duplicate titles hurt naming consistency.');
+            recommendations.push('Rename duplicate titles with distinct wording.');
+        }
+        if (metrics.genericTitleCount > 0) {
+            score -= metrics.genericTitleCount * 3;
+            issues.push('Generic titles weaken style consistency.');
+            recommendations.push('Use consistent domain terminology in titles.');
+        }
+        if (metrics.weakTransitionCount > 0) {
+            score -= Math.min(16, metrics.weakTransitionCount * 3);
+            issues.push('Some neighboring slides are weakly connected.');
+            recommendations.push('Add stronger transitions between neighboring slides.');
+        }
+        if (metrics.redundantContentItemCount > 0) {
+            score -= Math.min(12, metrics.redundantContentItemCount * 1.5);
+            issues.push('Repeated content hurts writing consistency.');
+            recommendations.push('Trim repeated bullets and repeated summary text.');
+        }
+        if (metrics.dominantLayoutRatio > 0.92 && metrics.slideCount >= 8) {
+            score -= 7;
+            issues.push('Layout pattern is overly repetitive for a long deck.');
+            recommendations.push('Introduce controlled layout variation.');
+        }
+        if (Math.abs(metrics.summaryCoverage - metrics.promptCoverage) > 0.4 && metrics.slideCount >= 6) {
+            score -= 6;
+            issues.push('Planning completeness differs too much between text and image prompts.');
+            recommendations.push('Align summary coverage and prompt coverage.');
+        }
+        if (metrics.fallbackImageCount > 0) {
+            score -= Math.min(10, metrics.fallbackImageCount * 2);
+            issues.push('Fallback images reduce visual consistency.');
+            recommendations.push('Reduce fallback image ratio.');
+        }
+        if (
+            metrics.duplicateTitleCount === 0 &&
+            metrics.genericTitleCount === 0 &&
+            metrics.weakTransitionCount === 0 &&
+            metrics.redundantContentItemCount === 0
+        ) {
+            score += 4;
+            evidence.push('Content style consistency is high.');
+        }
+
+        const boundedScore = this.clamp(this.round(score, 1), 0, 100);
+        const finalScore = issues.length > 0 ? Math.min(boundedScore, 98) : boundedScore;
+        return {
+            name: 'Consistency',
+            score: finalScore,
+            weight: this.consistencyWeight,
+            weightedScore: this.round(finalScore * this.consistencyWeight, 1),
+            evidence,
+            issues,
+            recommendations,
+        };
+    }
+
     private countLevelJumpViolations(slides: SlideContent[]): number {
         let violations = 0;
-        for (let i = 1; i < slides.length; i++) {
+        for (let i = 1; i < slides.length; i += 1) {
             const prev = slides[i - 1].level || 1;
             const curr = slides[i].level || 1;
             if (Math.abs(curr - prev) > 1) {
@@ -384,87 +509,88 @@ export class EvaluatorService {
     }
 
     private countDuplicateTitles(slides: SlideContent[]): number {
-        const count = new Map<string, number>();
-        slides.forEach((s) => {
-            const key = this.cleanText(s.title).toLowerCase();
+        const countByTitle = new Map<string, number>();
+        slides.forEach((slide) => {
+            const key = this.cleanText(slide.title).toLowerCase();
             if (!key) return;
-            count.set(key, (count.get(key) || 0) + 1);
+            countByTitle.set(key, (countByTitle.get(key) || 0) + 1);
         });
         let duplicates = 0;
-        count.forEach((value) => {
-            if (value > 1) duplicates += value - 1;
+        countByTitle.forEach((count) => {
+            if (count > 1) {
+                duplicates += count - 1;
+            }
         });
         return duplicates;
+    }
+
+    private countGenericTitles(slides: SlideContent[]): number {
+        return slides.filter((slide) => this.isGenericTitle(slide.title)).length;
+    }
+
+    private countWeakTransitions(slides: SlideContent[]): number {
+        let weakCount = 0;
+
+        for (let i = 1; i < slides.length; i += 1) {
+            const prev = slides[i - 1];
+            const curr = slides[i];
+            if (this.hasTransitionCue(this.collectSlideText(curr))) {
+                continue;
+            }
+
+            const prevTokens = this.extractKeywords(this.collectSlideText(prev));
+            const currTokens = this.extractKeywords(this.collectSlideText(curr));
+            const overlap = this.keywordOverlap(prevTokens, currTokens);
+            const levelGap = Math.abs((prev.level || 1) - (curr.level || 1));
+            const hasBreadcrumb = this.cleanText(curr.breadcrumb || '').length > 0;
+            if ((overlap < 0.06 && levelGap > 1 && !hasBreadcrumb) || (overlap < 0.04 && !hasBreadcrumb)) {
+                weakCount += 1;
+            }
+        }
+
+        return weakCount;
+    }
+
+    private countActionCueSlides(slides: SlideContent[]): number {
+        return slides.filter((slide) => this.hasActionCue(this.collectSlideText(slide))).length;
     }
 
     private countIntraSlideRedundancyItems(slide: SlideContent): number {
         const bullets = slide.bullets.map((b) => this.cleanText(b)).filter(Boolean);
         let duplicateItems = 0;
+        const countByNormalized = new Map<string, number>();
 
-        const bulletCountByKey = new Map<string, number>();
         bullets.forEach((bullet) => {
             const key = this.normalizeForCompare(bullet);
             if (!key) return;
-            bulletCountByKey.set(key, (bulletCountByKey.get(key) || 0) + 1);
+            countByNormalized.set(key, (countByNormalized.get(key) || 0) + 1);
         });
 
-        bulletCountByKey.forEach((count) => {
+        countByNormalized.forEach((count) => {
             if (count > 1) {
                 duplicateItems += count - 1;
             }
         });
 
         const summary = this.cleanText(slide.summary || '');
-        if (summary && this.isSummaryRedundant(summary, bullets, slide.title)) {
-            duplicateItems += 1;
+        if (summary) {
+            const summaryNorm = this.normalizeForCompare(summary);
+            if (bullets.some((bullet) => this.normalizeForCompare(bullet) === summaryNorm)) {
+                duplicateItems += 1;
+            }
         }
 
         return duplicateItems;
     }
 
-    private isSummaryRedundant(summary: string, bullets: string[], title: string): boolean {
-        const summaryNormalized = this.normalizeForCompare(summary);
-        if (!summaryNormalized) return true;
-
-        const summaryWithoutTitleNormalized = this.normalizeForCompare(
-            summary.replace(new RegExp(`^\\s*${this.escapeRegExp(title)}\\s*[:：,，。\\-]*\\s*`, 'i'), ''),
-        );
-        const candidates = [summaryNormalized, summaryWithoutTitleNormalized].filter(Boolean);
-
-        for (const bullet of bullets) {
-            const bulletNormalized = this.normalizeForCompare(bullet);
-            if (!bulletNormalized) continue;
-            for (const candidate of candidates) {
-                if (!candidate) continue;
-                if (candidate === bulletNormalized) {
-                    return true;
-                }
-                if (candidate.length >= 8 && bulletNormalized.length >= 8) {
-                    if (candidate.includes(bulletNormalized) || bulletNormalized.includes(candidate)) {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        return false;
-    }
-
-    private normalizeForCompare(text: string): string {
-        return this.cleanText(text).toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
-    }
-
-    private escapeRegExp(input: string): string {
-        return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    }
-
     private countOverflowRiskSlides(slides: SlideContent[]): number {
-        return slides.filter((s) => {
-            if (s.layout === 'image_only') return false;
-            const titleLen = this.cleanText(s.title).length;
-            const bulletCount = s.bullets.length;
-            const textLen = this.totalTextLength(s);
-            return titleLen > 44 || bulletCount > 6 || textLen > 280;
+        return slides.filter((slide) => {
+            if (slide.layout === 'image_only') return false;
+            const titleLen = this.cleanText(slide.title).length;
+            const summaryLen = this.cleanText(slide.summary || '').length;
+            const bulletCount = slide.bullets.length;
+            const totalLen = this.totalTextLength(slide);
+            return titleLen > 44 || summaryLen > 130 || bulletCount > 6 || totalLen > 280;
         }).length;
     }
 
@@ -475,67 +601,9 @@ export class EvaluatorService {
     }
 
     private promptAlignment(slide: SlideContent): number {
-        const contentText = [
-            slide.title,
-            slide.summary || '',
-            slide.bullets.join(' '),
-            slide.breadcrumb || '',
-        ].join(' ');
-        const promptText = [slide.imageIntent || '', slide.imagePrompt || ''].join(' ');
-
-        const contentKeywords = this.extractKeywords(contentText);
-        const promptKeywords = this.extractKeywords(promptText);
-        if (contentKeywords.size === 0 || promptKeywords.size === 0) {
-            return 0;
-        }
-
-        let overlap = 0;
-        contentKeywords.forEach((token) => {
-            if (promptKeywords.has(token)) {
-                overlap += 1;
-            }
-        });
-
-        return overlap / contentKeywords.size;
-    }
-
-    private extractKeywords(text: string): Set<string> {
-        const cleaned = this.cleanText(text).toLowerCase();
-        const tokens = cleaned.match(/[\u4e00-\u9fff]{2,}|[a-z0-9]{3,}/g) || [];
-        const stop = new Set([
-            'the',
-            'and',
-            'for',
-            'with',
-            'that',
-            'this',
-            'from',
-            'into',
-            'presentation',
-            'slide',
-            'about',
-            'context',
-            'style',
-            'modern',
-            'image',
-            'content',
-            'summary',
-            '\u5173\u952e\u70b9',
-            '\u4e0a\u4e0b\u6587',
-            '\u5185\u5bb9',
-            '\u603b\u7ed3',
-            '\u9875\u9762',
-            '\u4e3b\u9898',
-            '\u4ecb\u7ecd',
-        ]);
-
-        const result = new Set<string>();
-        tokens.forEach((token) => {
-            if (!stop.has(token)) {
-                result.add(token);
-            }
-        });
-        return result;
+        const contentKeywords = this.extractKeywords(this.collectSlideText(slide));
+        const promptKeywords = this.extractKeywords([slide.imageIntent || '', slide.imagePrompt || ''].join(' '));
+        return this.keywordOverlap(contentKeywords, promptKeywords);
     }
 
     private totalTextLength(slide: SlideContent): number {
@@ -548,54 +616,170 @@ export class EvaluatorService {
 
     private isSparseContentSlide(slide: SlideContent): boolean {
         const bulletCount = slide.bullets.filter((b) => this.cleanText(b).length > 0).length;
-        const textLength = this.totalTextLength(slide);
+        const textLen = this.totalTextLength(slide);
         const hasSummary = this.cleanText(slide.summary || '').length > 0;
-
-        return (bulletCount <= 1 && textLength < 90) || (!hasSummary && bulletCount === 0);
+        return (bulletCount <= 1 && textLen < 90) || (!hasSummary && bulletCount === 0);
     }
 
     private isSevereSparseContentSlide(slide: SlideContent): boolean {
         const bulletCount = slide.bullets.filter((b) => this.cleanText(b).length > 0).length;
-        const textLength = this.totalTextLength(slide);
-        const titleLength = this.cleanText(slide.title).length;
+        const textLen = this.totalTextLength(slide);
+        const titleLen = this.cleanText(slide.title).length;
+        return bulletCount === 0 || (bulletCount <= 1 && textLen < 55 && titleLen < 28);
+    }
 
-        return bulletCount === 0 || (bulletCount <= 1 && textLength < 55 && titleLength < 28);
+    private isGenericTitle(title: string): boolean {
+        const normalized = this.cleanText(title).toLowerCase();
+        if (!normalized) return true;
+        const patterns = [
+            /^slide\s*\d+$/,
+            /^page\s*\d+$/,
+            /^section\s*\d+$/,
+            /^chapter\s*\d+$/,
+            /^part\s*\d+$/,
+            /^topic\s*\d+$/,
+            /^overview$/,
+            /^summary$/,
+            /^untitled/,
+            /^内容\d*$/,
+            /^页面\d*$/,
+            /^章节\d*$/,
+            /^未命名/,
+            /^主题$/,
+        ];
+        return patterns.some((pattern) => pattern.test(normalized));
+    }
+
+    private hasActionCue(text: string): boolean {
+        const normalized = this.cleanText(text).toLowerCase();
+        if (!normalized) return false;
+        const patterns = [
+            /\bnext step\b/,
+            /\brecommend(?:ation)?\b/,
+            /\baction\b/,
+            /\btakeaway\b/,
+            /\bconclusion\b/,
+            /\bimpact\b/,
+            /下一步/,
+            /建议/,
+            /结论/,
+            /启示/,
+            /行动/,
+            /落地/,
+            /关键点/,
+            /影响/,
+            /总结/,
+        ];
+        return patterns.some((pattern) => pattern.test(normalized));
+    }
+
+    private hasTransitionCue(text: string): boolean {
+        const normalized = this.cleanText(text).toLowerCase();
+        if (!normalized) return false;
+        const patterns = [
+            /\bnext\b/,
+            /\bthen\b/,
+            /\bafter\b/,
+            /\btherefore\b/,
+            /\bmeanwhile\b/,
+            /首先/,
+            /其次/,
+            /然后/,
+            /接着/,
+            /最后/,
+            /因此/,
+            /另一方面/,
+            /与此同时/,
+            /转向/,
+            /对比/,
+        ];
+        return patterns.some((pattern) => pattern.test(normalized));
+    }
+
+    private collectSlideText(slide: SlideContent): string {
+        return [slide.title, slide.summary || '', slide.breadcrumb || '', slide.bullets.join(' ')].join(' ');
+    }
+
+    private extractKeywords(text: string): Set<string> {
+        const cleaned = this.cleanText(text).toLowerCase();
+        const tokens = cleaned.match(/[\u4e00-\u9fff]{2,}|[a-z0-9]{3,}/g) || [];
+        const stopWords = new Set([
+            'the',
+            'and',
+            'for',
+            'with',
+            'this',
+            'that',
+            'from',
+            'into',
+            'about',
+            'presentation',
+            'slide',
+            'content',
+            'summary',
+            'style',
+            'image',
+            'topic',
+            'section',
+            'context',
+            '页面',
+            '内容',
+            '总结',
+            '主题',
+            '关键点',
+        ]);
+
+        const set = new Set<string>();
+        tokens.forEach((token) => {
+            if (!stopWords.has(token)) {
+                set.add(token);
+            }
+        });
+        return set;
+    }
+
+    private keywordOverlap(left: Set<string>, right: Set<string>): number {
+        if (left.size === 0 || right.size === 0) return 0;
+        let overlap = 0;
+        left.forEach((token) => {
+            if (right.has(token)) {
+                overlap += 1;
+            }
+        });
+        return overlap / left.size;
+    }
+
+    private normalizeForCompare(text: string): string {
+        return this.cleanText(text).toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
     }
 
     private collectKeyFindings(
         metrics: QualityMetrics,
         logic: QualityDimensionScore,
         layout: QualityDimensionScore,
-        imageSemantics: QualityDimensionScore,
-        contentRichness: QualityDimensionScore,
+        image: QualityDimensionScore,
+        richness: QualityDimensionScore,
+        audience: QualityDimensionScore,
+        consistency: QualityDimensionScore,
     ): string[] {
         const findings: string[] = [];
-        findings.push(`Overall image coverage: ${(metrics.imageCoverage * 100).toFixed(1)}%.`);
-        findings.push(`Prompt alignment average: ${(metrics.promptAlignmentAvg * 100).toFixed(1)}%.`);
-        findings.push(`Sparse content slides: ${metrics.sparseContentSlideCount} (severe: ${metrics.severeSparseContentSlideCount}).`);
-        findings.push(
-            `Dimension scores -> Logic: ${logic.score}, Layout: ${layout.score}, Image: ${imageSemantics.score}, Richness: ${contentRichness.score}.`,
-        );
-        findings.push(
-            `Same-slide repeated content items: ${metrics.redundantContentItemCount} on ${metrics.redundantContentSlideCount} slides.`,
-        );
-
+        findings.push(`Image coverage ${(metrics.imageCoverage * 100).toFixed(1)}%, prompt coverage ${(metrics.promptCoverage * 100).toFixed(1)}%.`);
+        findings.push(`Summary coverage ${(metrics.summaryCoverage * 100).toFixed(1)}%, sparse slides ${metrics.sparseContentSlideCount} (severe ${metrics.severeSparseContentSlideCount}).`);
+        findings.push(`Titles: duplicate ${metrics.duplicateTitleCount}, generic ${metrics.genericTitleCount}; weak transitions ${metrics.weakTransitionCount}.`);
+        findings.push(`Scores -> Logic ${logic.score}, Layout ${layout.score}, Image ${image.score}, Richness ${richness.score}, Audience ${audience.score}, Consistency ${consistency.score}.`);
         if (metrics.fallbackImageCount > 0) {
             findings.push(`Fallback images used on ${metrics.fallbackImageCount} slides.`);
         }
         if (metrics.overflowRiskSlideCount > 0) {
-            findings.push(`${metrics.overflowRiskSlideCount} slides are at risk of text overflow.`);
+            findings.push(`${metrics.overflowRiskSlideCount} slides have potential text overflow risk.`);
         }
-
         return findings;
     }
 
     private collectNextActions(...dimensions: QualityDimensionScore[]): string[] {
         const actions = new Set<string>();
-        dimensions.forEach((dimension) => {
-            dimension.recommendations.forEach((rec) => actions.add(rec));
-        });
-        return Array.from(actions).slice(0, 8);
+        dimensions.forEach((d) => d.recommendations.forEach((rec) => actions.add(rec)));
+        return Array.from(actions).slice(0, 10);
     }
 
     private getGrade(score: number): string {
@@ -607,46 +791,27 @@ export class EvaluatorService {
     }
 
     private toMarkdown(report: QualityReport): string {
-        const lines: string[] = [];
-        lines.push(`# PPT Quality Report`);
-        lines.push('');
-        lines.push(`- Title: ${report.title}`);
-        lines.push(`- Generated At: ${report.generatedAt}`);
+        const lines = [
+            '# PPT Quality Report',
+            '',
+            `- Title: ${report.title}`,
+            `- Generated At: ${report.generatedAt}`,
+            `- Overall Score: **${report.overallScore} / 100**`,
+            `- Grade: **${report.grade}**`,
+        ];
         if (report.outputPath) {
             lines.push(`- Output: ${report.outputPath}`);
         }
-        lines.push(`- Overall Score: **${report.overallScore} / 100**`);
-        lines.push(`- Grade: **${report.grade}**`);
-        lines.push('');
-        lines.push('## Dimension Scores');
-        lines.push('');
-        lines.push('| Dimension | Score | Weight | Weighted |');
-        lines.push('|---|---:|---:|---:|');
-        lines.push(
-            `| ${report.dimensions.logic.name} | ${report.dimensions.logic.score} | ${report.dimensions.logic.weight} | ${report.dimensions.logic.weightedScore} |`,
-        );
-        lines.push(
-            `| ${report.dimensions.layout.name} | ${report.dimensions.layout.score} | ${report.dimensions.layout.weight} | ${report.dimensions.layout.weightedScore} |`,
-        );
-        lines.push(
-            `| ${report.dimensions.imageSemantics.name} | ${report.dimensions.imageSemantics.score} | ${report.dimensions.imageSemantics.weight} | ${report.dimensions.imageSemantics.weightedScore} |`,
-        );
-        lines.push(
-            `| ${report.dimensions.contentRichness.name} | ${report.dimensions.contentRichness.score} | ${report.dimensions.contentRichness.weight} | ${report.dimensions.contentRichness.weightedScore} |`,
-        );
-        lines.push('');
-        lines.push('## Metrics');
-        lines.push('');
-        lines.push('```json');
-        lines.push(JSON.stringify(report.metrics, null, 2));
-        lines.push('```');
-        lines.push('');
-        lines.push('## Key Findings');
-        lines.push('');
+        lines.push('', '## Dimension Scores', '', '| Dimension | Score | Weight | Weighted |', '|---|---:|---:|---:|');
+        lines.push(`| ${report.dimensions.logic.name} | ${report.dimensions.logic.score} | ${report.dimensions.logic.weight} | ${report.dimensions.logic.weightedScore} |`);
+        lines.push(`| ${report.dimensions.layout.name} | ${report.dimensions.layout.score} | ${report.dimensions.layout.weight} | ${report.dimensions.layout.weightedScore} |`);
+        lines.push(`| ${report.dimensions.imageSemantics.name} | ${report.dimensions.imageSemantics.score} | ${report.dimensions.imageSemantics.weight} | ${report.dimensions.imageSemantics.weightedScore} |`);
+        lines.push(`| ${report.dimensions.contentRichness.name} | ${report.dimensions.contentRichness.score} | ${report.dimensions.contentRichness.weight} | ${report.dimensions.contentRichness.weightedScore} |`);
+        lines.push(`| ${report.dimensions.audienceFit.name} | ${report.dimensions.audienceFit.score} | ${report.dimensions.audienceFit.weight} | ${report.dimensions.audienceFit.weightedScore} |`);
+        lines.push(`| ${report.dimensions.consistency.name} | ${report.dimensions.consistency.score} | ${report.dimensions.consistency.weight} | ${report.dimensions.consistency.weightedScore} |`);
+        lines.push('', '## Metrics', '', '```json', JSON.stringify(report.metrics, null, 2), '```', '', '## Key Findings', '');
         report.keyFindings.forEach((finding) => lines.push(`- ${finding}`));
-        lines.push('');
-        lines.push('## Suggested Next Actions');
-        lines.push('');
+        lines.push('', '## Suggested Next Actions', '');
         report.nextActions.forEach((action) => lines.push(`- ${action}`));
         lines.push('');
         return lines.join('\n');
@@ -657,12 +822,12 @@ export class EvaluatorService {
         return input.replace(/\r?\n+/g, ' ').replace(/\s+/g, ' ').trim();
     }
 
-    private clamp(value: number, min: number, max: number): number {
-        return Math.max(min, Math.min(max, value));
-    }
-
     private round(value: number, digits = 0): number {
         const factor = 10 ** digits;
         return Math.round(value * factor) / factor;
+    }
+
+    private clamp(value: number, min: number, max: number): number {
+        return Math.max(min, Math.min(max, value));
     }
 }

@@ -38,18 +38,26 @@ export interface QualityDimensionScore {
 export interface QualityMetrics {
     slideCount: number;
     slideWithImageCount: number;
+    slidesWithSummaryCount: number;
+    slidesWithPromptCount: number;
     imageCoverage: number;
+    summaryCoverage: number;
+    promptCoverage: number;
     avgBulletsPerSlide: number;
     avgTextLengthPerSlide: number;
     avgBulletLength: number;
     levelJumpViolations: number;
     duplicateTitleCount: number;
+    genericTitleCount: number;
+    weakTransitionCount: number;
+    actionCueSlideCount: number;
     redundantContentSlideCount: number;
     redundantContentItemCount: number;
     sparseContentSlideCount: number;
     severeSparseContentSlideCount: number;
     overlaySlideCount: number;
     imageOnlySlideCount: number;
+    dominantLayoutRatio: number;
     overflowRiskSlideCount: number;
     promptAlignmentAvg: number;
     fallbackImageCount: number;
@@ -67,6 +75,8 @@ export interface QualityReport {
         layout: QualityDimensionScore;
         imageSemantics: QualityDimensionScore;
         contentRichness: QualityDimensionScore;
+        audienceFit: QualityDimensionScore;
+        consistency: QualityDimensionScore;
     };
     metrics: QualityMetrics;
     keyFindings: string[];
