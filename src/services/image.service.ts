@@ -38,6 +38,14 @@ export class ImageService {
             return primaryImage;
         }
 
+        console.log('图片生成失败，尝试使用简化提示词重试...');
+        const safePrompt = `A professional abstract presentation background about technology. Minimalist style, high quality, 4k. No text.`;
+        const safeImage = await this.generateByPrimaryApi(safePrompt);
+        if (safeImage) {
+            this.cache.set(cacheKey, safeImage);
+            return safeImage;
+        }
+
         const fallbackImage = await this.generateByFallback(prompt);
         if (fallbackImage) {
             this.cache.set(cacheKey, fallbackImage);
@@ -148,14 +156,17 @@ export class ImageService {
     }
 
     private buildPrompt(slide: SlideContent): string {
-        const context = slide.breadcrumb ? `上下文：${slide.breadcrumb}。` : '';
-        const keyPoints = slide.bullets.slice(0, 4).join('；');
+        const cleanTitle = slide.title.replace(/\(Cont\..*\)/, '');
+        const context = slide.breadcrumb ? `Context: ${slide.breadcrumb}.` : '';
+        // Clean up bullets to remove potential sensitive words or complex characters
+        const cleanedBullets = slide.bullets.slice(0, 2).map(b => b.replace(/[^\w\s\u4e00-\u9fa5,.，。]/g, ''));
+        const keyPoints = cleanedBullets.join(', ');
 
         return [
-            `Create a high-quality 16:9 presentation illustration about "${slide.title}".`,
+            `A professional and modern presentation slide illustration about: ${cleanTitle}.`,
             context,
-            keyPoints ? `关键点：${keyPoints}。` : '',
-            'Style: modern, professional, clean composition, no text, no watermark.',
+            keyPoints ? `Key concepts: ${keyPoints}.` : '',
+            'Minimalist style, tech-oriented, clean background, high quality, 4k. No text, no people.',
         ]
             .filter(Boolean)
             .join(' ');

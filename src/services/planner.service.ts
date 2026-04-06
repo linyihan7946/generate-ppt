@@ -89,21 +89,17 @@ export class PlannerService {
         ].join(' ');
 
         const userPrompt = this.buildUserPrompt(docData, mode);
+        const combinedPrompt = `${systemPrompt}\n\n${userPrompt}`;
         const payload = {
-            prompt: userPrompt,
-            messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: userPrompt },
-            ],
+            prompt: combinedPrompt,
             temperature: mode === 'creative' ? 0.35 : 0.15,
-            useSearch: false,
             model: this.model,
             stream: false,
-            sessionId: `ppt-planner-${Date.now()}`,
         };
 
         try {
-            const response = await axios.post(`${this.baseUrl}/api/llm`, payload, {
+            console.log(`[LLM] Calling ${this.baseUrl}/api/llm/direct with model ${this.model}...`);
+            const response = await axios.post(`${this.baseUrl}/api/llm/direct`, payload, {
                 headers: {
                     'Content-Type': 'application/json',
                     Authorization: `Bearer ${token}`,
@@ -113,11 +109,14 @@ export class PlannerService {
                 validateStatus: () => true,
             });
 
+            console.log(`[LLM] Response status: ${response.status}`);
             if (response.status !== 200 || response.data?.success === false) {
                 console.warn(`Planner API failed: status=${response.status}, message=${response.data?.message || 'unknown'}`);
                 return null;
             }
 
+            console.log(`[LLM] Response data:`, JSON.stringify(response.data).substring(0, 200) + '...');
+            
             const rawText = this.extractModelText(response.data);
             if (!rawText) {
                 console.warn('Planner API returned empty content.');
@@ -233,8 +232,12 @@ export class PlannerService {
             return payload.message;
         }
 
-        const choiceText = payload.choices?.[0]?.message?.content;
+        const choiceText = payload.choices?.[0]?.message?.content || payload.choices?.[0]?.text;
         if (typeof choiceText === 'string') return choiceText;
+        
+        const dataChoiceText = payload.data?.choices?.[0]?.message?.content || payload.data?.choices?.[0]?.text;
+        if (typeof dataChoiceText === 'string') return dataChoiceText;
+        
         return '';
     }
 
@@ -492,28 +495,20 @@ export class PlannerService {
             '{"slides":[{"index":1,"summary":"string","bullets":["..."]}]}',
         ].join('\n');
 
+        const systemPrompt = 'You are a presentation editor who expands sparse slides with grounded, concise content. Return JSON only.';
+        const userPrompt = `${rules}\n\nTarget document:\n${JSON.stringify({ title: docData.title, targetSlides }, null, 2)}`;
+        const combinedPrompt = `${systemPrompt}\n\n${userPrompt}`;
+
         const payload = {
-            prompt: `${rules}\n\nTarget document:\n${JSON.stringify({ title: docData.title, targetSlides }, null, 2)}`,
-            messages: [
-                {
-                    role: 'system',
-                    content:
-                        'You are a presentation editor who expands sparse slides with grounded, concise content. Return JSON only.',
-                },
-                {
-                    role: 'user',
-                    content: `${rules}\n\nTarget document:\n${JSON.stringify({ title: docData.title, targetSlides }, null, 2)}`,
-                },
-            ],
+            prompt: combinedPrompt,
             temperature: mode === 'creative' ? 0.4 : 0.2,
-            useSearch: false,
             model: this.model,
             stream: false,
-            sessionId: `ppt-sparse-expand-${Date.now()}`,
         };
 
         try {
-            const response = await axios.post(`${this.baseUrl}/api/llm`, payload, {
+            console.log(`[LLM Sparse Expansion] Calling ${this.baseUrl}/api/llm/direct...`);
+            const response = await axios.post(`${this.baseUrl}/api/llm/direct`, payload, {
                 headers: {
                     'Content-Type': 'application/json',
                     Authorization: `Bearer ${token}`,
@@ -842,7 +837,7 @@ export class PlannerService {
     }
 
     private canUseWorkerProxy(): boolean {
-        return Boolean(this.workerUrl && this.workerApiKey);
+        return false; // Force using the primary LLM API endpoint
     }
 
     private async callGeminiViaWorker(prompt: string, temperature: number): Promise<string> {
