@@ -9,9 +9,7 @@ import cors from 'cors';
 import { ParserService } from './services/parser.service';
 import { PPTService } from './services/ppt.service';
 import { ImageService } from './services/image.service';
-import { PlannerService } from './services/planner.service';
-import { EvaluatorService } from './services/evaluator.service';
-import { DocumentData, PlannerMode } from './types';
+import { DocumentData } from './types';
 
 dotenv.config();
 
@@ -41,16 +39,6 @@ const upload = multer({ storage });
 const parserService = new ParserService();
 const pptService = new PPTService();
 const imageService = new ImageService();
-const plannerService = new PlannerService();
-const evaluatorService = new EvaluatorService();
-
-function normalizePlannerMode(input?: string): PlannerMode | undefined {
-    if (input === 'strict' || input === 'creative') {
-        return input;
-    }
-
-    return undefined;
-}
 
 app.post('/generate-ppt', upload.single('file'), async (req, res) => {
     try {
@@ -75,17 +63,7 @@ app.post('/generate-ppt', upload.single('file'), async (req, res) => {
             return res.status(400).send('Unsupported file format.');
         }
 
-        // 2. Plan slide narrative/layout (Gemini 3.1 Pro + fallback heuristics)
-        const plannerModeArg = typeof req.body?.plannerMode === 'string' ? req.body.plannerMode : undefined;
-        const plannerMode = normalizePlannerMode(plannerModeArg);
-        if (plannerModeArg && !plannerMode) {
-            return res.status(400).send('Invalid plannerMode. Use strict or creative.');
-        }
-
-        console.log('Planning slide narrative and layout...');
-        docData = await plannerService.planDocument(docData, { mode: plannerMode });
-
-        // 3. Optional: Generate AI Images for slides that have none
+        // 2. Optional: Generate AI Images for slides that have none
         const enableAiImages = process.env.ENABLE_AI_IMAGES !== 'false';
         const imageConcurrency = Number(process.env.IMAGE_CONCURRENCY || 2);
         if (enableAiImages) {
@@ -93,7 +71,7 @@ app.post('/generate-ppt', upload.single('file'), async (req, res) => {
             await imageService.enrichSlidesWithGeneratedImages(docData.slides, imageConcurrency);
         }
 
-        // 4. Generate PPT
+        // 3. Generate PPT
         const outputFilename = `presentation-${Date.now()}.pptx`;
         
         // Use the output directory in the project root
@@ -107,23 +85,7 @@ app.post('/generate-ppt', upload.single('file'), async (req, res) => {
         console.log('Generating PPT...');
         await pptService.generate(docData, outputPath);
 
-        // 5. Evaluate quality and persist report
-        let qualityScore: number | null = null;
-        const enableEvaluation = process.env.ENABLE_EVALUATION !== 'false';
-        if (enableEvaluation) {
-            const report = evaluatorService.evaluate(docData, outputPath);
-            const reportPaths = evaluatorService.saveReport(report, outputPath);
-            qualityScore = report.overallScore;
-            console.log(
-                `Quality report generated: score=${report.overallScore}, json=${reportPaths.jsonPath}, md=${reportPaths.markdownPath}`,
-            );
-        }
-
-        if (qualityScore !== null) {
-            res.setHeader('X-PPT-Quality-Score', String(qualityScore));
-        }
-
-        // 5. Send File
+        // 4. Send File
         res.download(outputPath, (err) => {
             if (err) {
                 console.error('Error sending file:', err);
