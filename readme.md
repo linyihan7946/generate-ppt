@@ -33,10 +33,11 @@ PLANNER_MODEL=gemini-3.1-pro-preview
 PLANNER_API_BASE_URL=https://www.aigenimage.cn:3001
 PLANNER_AUTH_TOKEN=
 LLM_AUTH_TOKEN=
+PLANNER_USE_WORKER_PROXY=false
 CLOUDFLARE_WORKER_URL=
 LLM_API_KEY=
 GOOGLE_API_KEY=
-AIWORKFLOW_BACKEND_ENV_PATH=E:\\GitHubWorkSpace\\aiworkflow\\back-end\\.env
+AIWORKFLOW_BACKEND_ENV_PATH=
 PLANNER_CONTENT_MODE=strict
 PLANNER_EXPAND_SPARSE_CONTENT=true
 PLANNER_USE_GUEST_LOGIN=false
@@ -52,8 +53,9 @@ PPT_MAX_BULLETS_PER_SLIDE=5
 
 - `PLANNER_AUTH_TOKEN` (or `LLM_AUTH_TOKEN`) is used for `/api/llm`.
 - If planner-specific token is empty, the planner will also try `IMAGE_API_KEY`.
-- If `CLOUDFLARE_WORKER_URL` + (`LLM_API_KEY` or `GOOGLE_API_KEY`) is available, planner will call Gemini via worker proxy first (no `PLANNER_AUTH_TOKEN` required).
-- If local `.env` does not contain worker settings, planner can auto-read `AIWORKFLOW_BACKEND_ENV_PATH` (default: `E:\\GitHubWorkSpace\\aiworkflow\\back-end\\.env`).
+- Worker proxy is disabled by default. Only when `PLANNER_USE_WORKER_PROXY=true` will planner read `CLOUDFLARE_WORKER_URL` + (`LLM_API_KEY` or `GOOGLE_API_KEY`) and call Gemini via worker proxy.
+- The current worker proxy mode still forwards to Google Gemini and therefore still needs a real provider key. If you already use `/api/llm` with `PLANNER_AUTH_TOKEN`, leave `PLANNER_USE_WORKER_PROXY=false`.
+- `AIWORKFLOW_BACKEND_ENV_PATH` is optional and is only read for worker-proxy settings when `PLANNER_USE_WORKER_PROXY=true`.
 - If not provided, planner falls back to local heuristic planning.
 - `PLANNER_USE_GUEST_LOGIN=true` can auto-login guest, but guest accounts may have zero points.
 
@@ -61,7 +63,7 @@ PPT_MAX_BULLETS_PER_SLIDE=5
 
 - `PLANNER_CONTENT_MODE=strict` (default): stay as close as possible to source content and wording.
 - `PLANNER_CONTENT_MODE=creative`: keep slide order and hierarchy, but allow Gemini 3.1 Pro to lightly polish bullets, summaries, and image direction without adding unsupported facts.
-- `PLANNER_EXPAND_SPARSE_CONTENT=true` (default): when a slide is too sparse, planner first fills baseline content and then asks LLM to expand it (worker proxy first, token-based `/api/llm` fallback).
+- `PLANNER_EXPAND_SPARSE_CONTENT=true` (default): when a slide is too sparse, planner first fills baseline content and then asks LLM to expand it (worker proxy only when explicitly enabled, otherwise token-based `/api/llm`).
 
 ### Quality evaluation system
 

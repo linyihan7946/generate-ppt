@@ -59,12 +59,14 @@ export class PlannerService {
     private allowGuestLogin: boolean;
     private defaultMode: PlannerMode;
     private sparseExpansionEnabled: boolean;
+    private useWorkerProxy: boolean;
     private workerUrl: string;
     private workerApiKey: string;
     private readonly understandingService: UnderstandingService;
 
     constructor() {
-        const externalEnv = this.loadExternalPlannerEnv();
+        this.useWorkerProxy = process.env.PLANNER_USE_WORKER_PROXY === 'true';
+        const externalEnv = this.useWorkerProxy ? this.loadExternalPlannerEnv() : {};
         this.baseUrl = process.env.PLANNER_API_BASE_URL || process.env.IMAGE_API_BASE_URL || 'https://www.aigenimage.cn:3001';
         this.authToken = process.env.PLANNER_AUTH_TOKEN || process.env.LLM_AUTH_TOKEN || '';
         this.fallbackAuthToken = process.env.IMAGE_API_KEY || '';
@@ -1642,7 +1644,7 @@ export class PlannerService {
     }
 
     private canUseWorkerProxy(): boolean {
-        return Boolean(this.workerUrl && this.workerApiKey);
+        return Boolean(this.useWorkerProxy && this.workerUrl && this.workerApiKey);
     }
 
     private async callGeminiViaWorker(prompt: string, temperature: number): Promise<string> {
@@ -1732,8 +1734,7 @@ export class PlannerService {
     }
 
     private loadExternalPlannerEnv(): Record<string, string> {
-        const envPath =
-            process.env.PLANNER_AIWORKFLOW_ENV_PATH || process.env.AIWORKFLOW_BACKEND_ENV_PATH || 'E:\\GitHubWorkSpace\\aiworkflow\\back-end\\.env';
+        const envPath = process.env.PLANNER_AIWORKFLOW_ENV_PATH || process.env.AIWORKFLOW_BACKEND_ENV_PATH || '';
         if (!envPath || !fs.existsSync(envPath)) {
             return {};
         }
