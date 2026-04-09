@@ -1,26 +1,53 @@
 import axios from 'axios';
 import fs from 'fs';
-import { DocumentData, PlannerMode, PlannerOptions, SlideContent, SlideLayoutType } from '../types';
+import {
+    DeckAudience,
+    DeckBrief,
+    DeckFocus,
+    DeckFormat,
+    DeckLength,
+    DeckStyle,
+    DocumentData,
+    PlannerMode,
+    PlannerOptions,
+    SlideContent,
+    SlideLayoutType,
+    SlideRole,
+} from '../types';
+import { UnderstandingService } from './understanding.service';
 
 interface PlannedSlide {
-    index: number;
     title: string;
     summary: string;
     bullets: string[];
     layout: SlideLayoutType;
     imageIntent: string;
     imagePrompt: string;
+    slideRole: SlideRole;
+    keyMessage: string;
+    speakerNotes: string[];
+    sourceRefs: number[];
 }
 
 interface PlannedDocument {
     title?: string;
+    brief?: Partial<DeckBrief>;
     slides: PlannedSlide[];
 }
 
 interface SparseExpansionSlide {
     index: number;
+    keyMessage: string;
     summary: string;
     bullets: string[];
+}
+
+interface PlanningPreferences {
+    audience: DeckAudience;
+    focus: DeckFocus;
+    style: DeckStyle;
+    deckFormat: DeckFormat;
+    length: DeckLength;
 }
 
 export class PlannerService {
@@ -34,6 +61,7 @@ export class PlannerService {
     private sparseExpansionEnabled: boolean;
     private workerUrl: string;
     private workerApiKey: string;
+    private readonly understandingService: UnderstandingService;
 
     constructor() {
         const externalEnv = this.loadExternalPlannerEnv();
@@ -48,28 +76,36 @@ export class PlannerService {
         this.workerUrl = process.env.CLOUDFLARE_WORKER_URL || externalEnv.CLOUDFLARE_WORKER_URL || '';
         this.workerApiKey =
             process.env.LLM_API_KEY || process.env.GOOGLE_API_KEY || externalEnv.LLM_API_KEY || externalEnv.GOOGLE_API_KEY || '';
+        this.understandingService = new UnderstandingService();
     }
 
     async planDocument(docData: DocumentData, options: PlannerOptions = {}): Promise<DocumentData> {
         const mode = this.resolvePlannerMode(options.mode);
-        const heuristic = this.buildHeuristicPlan(docData, mode);
-        let plannedDoc = heuristic;
+        const preferences = this.resolvePlanningPreferences(options);
+        const heuristicPlan = this.buildHeuristicPlan(docData, mode, preferences);
+        let plannedDoc = heuristicPlan;
 
-        if (!this.enabled) {
-            return this.expandSparseSlidesIfNeeded(plannedDoc, mode);
+        if (this.enabled) {
+            const llmPlan = await this.generatePlanWithGemini(docData, heuristicPlan.brief as DeckBrief, mode, preferences);
+            if (llmPlan && llmPlan.slides.length > 0) {
+                plannedDoc = this.mergePlannedDocument(heuristicPlan, llmPlan, mode, preferences);
+            }
         }
 
-        const llmPlan = await this.generatePlanWithGemini(docData, mode);
-        if (llmPlan) {
-            plannedDoc = this.mergePlan(heuristic, llmPlan);
-        }
-
-        return this.expandSparseSlidesIfNeeded(plannedDoc, mode);
+        plannedDoc = await this.expandSparseSlidesIfNeeded(plannedDoc, mode, preferences);
+        plannedDoc.slides = this.strengthenNarrativeContinuity(plannedDoc.slides, plannedDoc.title || docData.title);
+        plannedDoc.slides = this.ensureUniqueTitles(plannedDoc.slides);
+        return plannedDoc;
     }
 
-    private async generatePlanWithGemini(docData: DocumentData, mode: PlannerMode): Promise<PlannedDocument | null> {
+    private async generatePlanWithGemini(
+        docData: DocumentData,
+        brief: DeckBrief,
+        mode: PlannerMode,
+        preferences: PlanningPreferences,
+    ): Promise<PlannedDocument | null> {
         if (this.canUseWorkerProxy()) {
-            const viaWorker = await this.generatePlanWithWorkerProxy(docData, mode);
+            const viaWorker = await this.generatePlanWithWorkerProxy(docData, brief, mode, preferences);
             if (viaWorker) {
                 return viaWorker;
             }
@@ -81,24 +117,14 @@ export class PlannerService {
             return null;
         }
 
-        const systemPrompt = [
-            'You are a professional presentation strategist.',
-            'You must preserve source hierarchy and slide order.',
-            this.buildModeDirective(mode),
-            'Return only valid JSON with no markdown fences and no extra text.',
-        ].join(' ');
-
-        const userPrompt = this.buildUserPrompt(docData, mode);
-        const combinedPrompt = `${systemPrompt}\n\n${userPrompt}`;
         const payload = {
-            prompt: combinedPrompt,
-            temperature: mode === 'creative' ? 0.35 : 0.15,
+            prompt: this.buildPlannerPrompt(docData, brief, mode, preferences),
+            temperature: mode === 'creative' ? 0.35 : 0.2,
             model: this.model,
             stream: false,
         };
 
         try {
-            console.log(`[LLM] Calling ${this.baseUrl}/api/llm/direct with model ${this.model}...`);
             const response = await axios.post(`${this.baseUrl}/api/llm/direct`, payload, {
                 headers: {
                     'Content-Type': 'application/json',
@@ -109,14 +135,11 @@ export class PlannerService {
                 validateStatus: () => true,
             });
 
-            console.log(`[LLM] Response status: ${response.status}`);
             if (response.status !== 200 || response.data?.success === false) {
                 console.warn(`Planner API failed: status=${response.status}, message=${response.data?.message || 'unknown'}`);
                 return null;
             }
 
-            console.log(`[LLM] Response data:`, JSON.stringify(response.data).substring(0, 200) + '...');
-            
             const rawText = this.extractModelText(response.data);
             if (!rawText) {
                 console.warn('Planner API returned empty content.');
@@ -136,18 +159,17 @@ export class PlannerService {
         }
     }
 
-    private async generatePlanWithWorkerProxy(docData: DocumentData, mode: PlannerMode): Promise<PlannedDocument | null> {
-        const systemPrompt = [
-            'You are a professional presentation strategist.',
-            'You must preserve source hierarchy and slide order.',
-            this.buildModeDirective(mode),
-            'Return only valid JSON with no markdown fences and no extra text.',
-        ].join(' ');
-        const userPrompt = this.buildUserPrompt(docData, mode);
-        const prompt = `${systemPrompt}\n\n${userPrompt}`;
-
+    private async generatePlanWithWorkerProxy(
+        docData: DocumentData,
+        brief: DeckBrief,
+        mode: PlannerMode,
+        preferences: PlanningPreferences,
+    ): Promise<PlannedDocument | null> {
         try {
-            const text = await this.callGeminiViaWorker(prompt, mode === 'creative' ? 0.35 : 0.15);
+            const text = await this.callGeminiViaWorker(
+                this.buildPlannerPrompt(docData, brief, mode, preferences),
+                mode === 'creative' ? 0.35 : 0.2,
+            );
             if (!text) {
                 return null;
             }
@@ -162,6 +184,1172 @@ export class PlannerService {
         } catch (error: any) {
             console.warn('Planner worker proxy request failed:', error?.message || error);
             return null;
+        }
+    }
+
+    private buildPlannerPrompt(
+        docData: DocumentData,
+        brief: DeckBrief,
+        mode: PlannerMode,
+        preferences: PlanningPreferences,
+    ): string {
+        const compactSlides = docData.slides.map((slide, idx) => ({
+            sourceIndex: idx + 1,
+            title: slide.title,
+            summary: slide.summary || '',
+            bullets: slide.bullets,
+            level: slide.level || 1,
+            breadcrumb: slide.breadcrumb || '',
+        }));
+
+        const rules = [
+            'You are a professional presentation strategist.',
+            'Task: create a source-grounded PPT plan from uploaded material.',
+            'You may merge, split, reorder, or add agenda / summary / next-step slides if it improves presentation quality.',
+            'Do not introduce unsupported facts, dates, statistics, or named entities.',
+            'Every factual slide should stay grounded in the provided source slides.',
+            `Deck format: ${preferences.deckFormat}. Audience: ${preferences.audience}. Focus: ${preferences.focus}. Style: ${preferences.style}. Length: ${preferences.length}.`,
+            mode === 'creative'
+                ? 'Mode creative: polish phrasing, sharpen takeaways, and make slides presentation-ready without changing facts.'
+                : 'Mode strict: stay very close to the source meaning, with only minimal restructuring.',
+            'Use slideRole from: content, agenda, section_divider, key_insight, timeline, comparison, process, data_highlight, summary, next_step.',
+            'For presenter decks, keep visible text concise and put extra explanation into speakerNotes.',
+            'For detailed decks, visible bullets can be slightly fuller but should still be readable.',
+            'imagePrompt must be concise, visual, and avoid text/logo/watermark.',
+            'Return valid JSON only.',
+            'Output schema:',
+            '{"title":"string","brief":{"deckGoal":"string","audience":"general","focus":"overview","style":"professional","deckFormat":"presenter","desiredLength":"default","chapterTitles":["..."],"coreTakeaways":["..."]},"slides":[{"title":"string","slideRole":"content","keyMessage":"string","summary":"string","bullets":["..."],"speakerNotes":["..."],"sourceRefs":[1,2],"layout":"image_overlay","imageIntent":"string","imagePrompt":"string"}]}',
+        ].join('\n');
+
+        return `${rules}\n\nHeuristic brief:\n${JSON.stringify(brief, null, 2)}\n\nSource material:\n${JSON.stringify(
+            { title: docData.title, slides: compactSlides },
+            null,
+            2,
+        )}`;
+    }
+
+    private extractModelText(payload: any): string {
+        if (!payload) return '';
+        if (typeof payload === 'string') return payload;
+        if (typeof payload.data === 'string') return payload.data;
+        if (payload.data?.reply) return String(payload.data.reply);
+        if (payload.data?.text) return String(payload.data.text);
+        if (payload.data?.content) return String(payload.data.content);
+        if (payload.reply) return String(payload.reply);
+        if (payload.message && typeof payload.message === 'string' && payload.message.trim().startsWith('{')) {
+            return payload.message;
+        }
+
+        const choiceText = payload.choices?.[0]?.message?.content || payload.choices?.[0]?.text;
+        if (typeof choiceText === 'string') return choiceText;
+
+        const dataChoiceText = payload.data?.choices?.[0]?.message?.content || payload.data?.choices?.[0]?.text;
+        if (typeof dataChoiceText === 'string') return dataChoiceText;
+
+        return '';
+    }
+
+    private parsePlannedDocument(raw: string): PlannedDocument | null {
+        const jsonText = this.extractJsonBlock(raw);
+        if (!jsonText) return null;
+
+        try {
+            const parsed = JSON.parse(jsonText);
+            if (!parsed || !Array.isArray(parsed.slides)) return null;
+
+            const slides = parsed.slides
+                .map((slide: any) => this.normalizePlannedSlide(slide))
+                .filter((slide: PlannedSlide | null): slide is PlannedSlide => Boolean(slide));
+
+            if (slides.length === 0) return null;
+
+            return {
+                title: typeof parsed.title === 'string' ? this.cleanText(parsed.title, 80) : undefined,
+                brief: this.normalizeBrief(parsed.brief),
+                slides,
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    private normalizeBrief(input: any): Partial<DeckBrief> | undefined {
+        if (!input || typeof input !== 'object') {
+            return undefined;
+        }
+
+        return {
+            deckGoal: this.cleanText(input.deckGoal, 180),
+            audience: this.normalizeAudience(input.audience),
+            focus: this.normalizeFocus(input.focus),
+            style: this.normalizeStyle(input.style),
+            deckFormat: this.normalizeDeckFormat(input.deckFormat),
+            desiredLength: this.normalizeLength(input.desiredLength),
+            chapterTitles: this.normalizeStringList(input.chapterTitles, 8, 60),
+            coreTakeaways: this.normalizeStringList(input.coreTakeaways, 5, 120),
+        };
+    }
+
+    private normalizePlannedSlide(input: any): PlannedSlide | null {
+        const title = this.cleanText(input?.title, 80);
+        const bullets = this.normalizeBullets(Array.isArray(input?.bullets) ? input.bullets : [], 6);
+        const keyMessage = this.cleanText(input?.keyMessage, 140) || this.cleanText(input?.summary, 140) || title;
+        const summary = this.cleanText(input?.summary, 140);
+        const speakerNotes = this.normalizeStringList(input?.speakerNotes, 6, 180);
+        const sourceRefs = this.normalizeSourceRefs(input?.sourceRefs);
+        const slideRole = this.normalizeSlideRole(input?.slideRole);
+        const layout = this.normalizeLayout(input?.layout, slideRole);
+        const imageIntent = this.cleanText(input?.imageIntent, 180) || title || keyMessage;
+        const imagePrompt = this.cleanText(input?.imagePrompt, 220) || this.cleanText(`${title}. ${keyMessage}`, 220);
+
+        if (!title && bullets.length === 0 && !summary) {
+            return null;
+        }
+
+        return {
+            title: title || keyMessage || 'Slide',
+            summary,
+            bullets,
+            layout,
+            imageIntent,
+            imagePrompt,
+            slideRole,
+            keyMessage: keyMessage || title || 'Key message',
+            speakerNotes,
+            sourceRefs,
+        };
+    }
+
+    private extractJsonBlock(raw: string): string {
+        const fenced = raw.match(/```json\s*([\s\S]*?)\s*```/i) || raw.match(/```\s*([\s\S]*?)\s*```/i);
+        if (fenced?.[1]) {
+            return fenced[1].trim();
+        }
+
+        const firstBrace = raw.indexOf('{');
+        const lastBrace = raw.lastIndexOf('}');
+        if (firstBrace >= 0 && lastBrace > firstBrace) {
+            return raw.slice(firstBrace, lastBrace + 1);
+        }
+
+        return '';
+    }
+
+    private buildHeuristicPlan(
+        docData: DocumentData,
+        mode: PlannerMode,
+        preferences: PlanningPreferences,
+    ): DocumentData {
+        const normalizedSourceSlides = docData.slides.map((slide, idx) => {
+            const title = this.cleanText(slide.title, 80) || `Slide ${idx + 1}`;
+            const bullets = this.normalizeBullets(slide.bullets, preferences.deckFormat === 'presenter' ? 4 : 6);
+            const keyMessage = this.cleanText(slide.summary || bullets[0] || title, 140);
+            const summary = this.selectSummary(slide.summary || keyMessage || title, bullets, title);
+            const slideRole = this.inferSlideRole(
+                { ...slide, title, bullets, summary, sourceIndex: idx + 1 },
+                idx,
+                docData.slides,
+                preferences,
+            );
+
+            return this.enrichSlideForRole(
+                {
+                    ...slide,
+                    title,
+                    bullets,
+                    summary,
+                    keyMessage,
+                    sourceIndex: idx + 1,
+                    sourceRefs: [idx + 1],
+                    slideRole,
+                },
+                docData.title,
+                mode,
+                preferences,
+            );
+        });
+
+        const understanding = this.understandingService.analyze({
+            title: docData.title,
+            slides: normalizedSourceSlides,
+        });
+        const brief = this.buildDeckBrief(docData.title, understanding, preferences);
+
+        const slides: SlideContent[] = [];
+        if (this.shouldAddAgenda(normalizedSourceSlides, preferences)) {
+            slides.push(this.buildAgendaSlide(brief, normalizedSourceSlides, docData.title, mode, preferences));
+        }
+
+        normalizedSourceSlides.forEach((slide) => slides.push(slide));
+        const closedSlides = this.ensureClosingSlides(slides, brief, docData.title, mode, preferences);
+
+        return {
+            title: this.cleanText(docData.title, 80) || 'Presentation',
+            brief,
+            understanding,
+            slides: this.ensureUniqueTitles(closedSlides),
+        };
+    }
+
+    private buildDeckBrief(
+        title: string,
+        understanding: DocumentData['understanding'],
+        preferences: PlanningPreferences,
+    ): DeckBrief {
+        const chapterTitles = (understanding?.chapterTitles || []).filter(Boolean).slice(0, 6);
+        const coreTakeaways = (understanding?.topics || [])
+            .map((topic) => topic.title)
+            .filter(Boolean)
+            .slice(0, 3);
+
+        return {
+            deckGoal: this.buildDeckGoal(title, preferences),
+            audience: preferences.audience,
+            focus: preferences.focus,
+            style: preferences.style,
+            deckFormat: preferences.deckFormat,
+            desiredLength: preferences.length,
+            chapterTitles,
+            coreTakeaways: coreTakeaways.length > 0 ? coreTakeaways : [this.cleanText(title, 80) || 'Core takeaway'],
+        };
+    }
+
+    private buildDeckGoal(title: string, preferences: PlanningPreferences): string {
+        const deckTitle = this.cleanText(title, 80) || 'the source material';
+        const audienceText = this.mapAudienceLabel(preferences.audience);
+        const focusText = this.mapFocusLabel(preferences.focus);
+        return `Help ${audienceText} understand ${deckTitle} with ${focusText} presentation framing.`;
+    }
+
+    private inferSlideRole(
+        slide: SlideContent,
+        index: number,
+        allSlides: SlideContent[],
+        preferences: PlanningPreferences,
+    ): SlideRole {
+        if (preferences.focus === 'timeline' || this.looksLikeTimeline(slide)) {
+            return 'timeline';
+        }
+        if (preferences.focus === 'comparison' || this.looksLikeComparison(slide)) {
+            return 'comparison';
+        }
+        if (preferences.focus === 'process' || this.looksLikeProcess(slide)) {
+            return 'process';
+        }
+        if (this.looksLikeDataHighlight(slide)) {
+            return 'data_highlight';
+        }
+        if (this.isSectionDividerCandidate(slide, index, allSlides)) {
+            return 'section_divider';
+        }
+        if (preferences.deckFormat === 'presenter' && slide.bullets.length <= 3) {
+            return 'key_insight';
+        }
+        return 'content';
+    }
+
+    private enrichSlideForRole(
+        slide: SlideContent,
+        deckTitle: string,
+        mode: PlannerMode,
+        preferences: PlanningPreferences,
+    ): SlideContent {
+        const slideRole = slide.slideRole || 'content';
+        const maxBullets = preferences.deckFormat === 'presenter' ? 4 : 6;
+        const bullets = this.normalizeBullets(slide.bullets, maxBullets);
+        const title = this.cleanText(slide.title, 80) || 'Slide';
+        const keyMessage = this.cleanText(slide.keyMessage || slide.summary || bullets[0] || title, 140) || title;
+        const summary = this.selectSummary(slide.summary || keyMessage, bullets, title);
+        const speakerNotes = this.buildSpeakerNotes(title, keyMessage, bullets, slideRole, preferences);
+        const layout = slide.layout || this.heuristicLayout(title, bullets, slideRole, preferences);
+        const keywordSeed = [title, keyMessage, ...bullets.slice(0, 2).map((bullet) => this.cleanText(bullet, 80))]
+            .filter(Boolean)
+            .join(' | ');
+        const imageIntent = this.cleanText(slide.imageIntent || keywordSeed, 180) || title;
+        const imagePrompt =
+            this.cleanText(
+                slide.imagePrompt || this.buildRoleAwareImagePrompt(deckTitle, title, keyMessage, bullets, slideRole, mode, preferences),
+                220,
+            ) || this.cleanText(`${keywordSeed}. visual`, 220);
+        const breadcrumb = this.cleanText(slide.breadcrumb || this.buildDefaultBreadcrumb(deckTitle, title, slideRole), 80);
+
+        return {
+            ...slide,
+            title,
+            bullets,
+            summary,
+            keyMessage,
+            speakerNotes,
+            layout,
+            imageIntent,
+            imagePrompt,
+            breadcrumb,
+            slideRole,
+            sourceRefs: this.normalizeSourceRefs(slide.sourceRefs || [slide.sourceIndex || 0]),
+        };
+    }
+
+    private shouldAddAgenda(slides: SlideContent[], preferences: PlanningPreferences): boolean {
+        if (slides.length < 4) return false;
+        return preferences.deckFormat === 'presenter' || preferences.length !== 'short';
+    }
+
+    private buildAgendaSlide(
+        brief: DeckBrief,
+        slides: SlideContent[],
+        deckTitle: string,
+        mode: PlannerMode,
+        preferences: PlanningPreferences,
+    ): SlideContent {
+        const isCjk = this.isMostlyCjk(deckTitle);
+        const chapterTitles =
+            brief.chapterTitles.length > 0
+                ? brief.chapterTitles
+                : slides.map((slide) => slide.title).filter(Boolean).slice(0, 5);
+
+        return this.enrichSlideForRole(
+            {
+                title: isCjk ? '内容导航' : 'Agenda',
+                bullets: chapterTitles,
+                images: [],
+                summary: brief.deckGoal,
+                keyMessage: brief.deckGoal,
+                slideRole: 'agenda',
+                sourceRefs: slides.map((slide) => slide.sourceIndex || 0).filter((ref) => ref > 0).slice(0, 6),
+            },
+            deckTitle,
+            mode,
+            preferences,
+        );
+    }
+
+    private ensureClosingSlides(
+        slides: SlideContent[],
+        brief: DeckBrief,
+        deckTitle: string,
+        mode: PlannerMode,
+        preferences: PlanningPreferences,
+    ): SlideContent[] {
+        const result = [...slides];
+        const hasSummary = result.some((slide) => slide.slideRole === 'summary');
+        if (!hasSummary && result.length >= 3) {
+            result.push(this.buildSummarySlide(brief, deckTitle, mode, preferences));
+        }
+
+        const hasNextStep = result.some((slide) => slide.slideRole === 'next_step');
+        if (!hasNextStep && preferences.deckFormat === 'presenter' && result.length >= 4) {
+            result.push(this.buildNextStepSlide(brief, deckTitle, mode, preferences));
+        }
+
+        return result;
+    }
+
+    private buildSummarySlide(
+        brief: DeckBrief,
+        deckTitle: string,
+        mode: PlannerMode,
+        preferences: PlanningPreferences,
+    ): SlideContent {
+        const isCjk = this.isMostlyCjk(deckTitle);
+        return this.enrichSlideForRole(
+            {
+                title: isCjk ? '核心总结' : 'Key Takeaways',
+                bullets: brief.coreTakeaways.slice(0, preferences.deckFormat === 'presenter' ? 3 : 4),
+                images: [],
+                summary: brief.deckGoal,
+                keyMessage: brief.deckGoal,
+                slideRole: 'summary',
+                sourceRefs: [],
+            },
+            deckTitle,
+            mode,
+            preferences,
+        );
+    }
+
+    private buildNextStepSlide(
+        brief: DeckBrief,
+        deckTitle: string,
+        mode: PlannerMode,
+        preferences: PlanningPreferences,
+    ): SlideContent {
+        const isCjk = this.isMostlyCjk(deckTitle);
+        return this.enrichSlideForRole(
+            {
+                title: isCjk ? '下一步' : 'Next Steps',
+                bullets: this.buildNextStepBullets(brief, isCjk),
+                images: [],
+                summary: isCjk ? '把关键结论转化为行动。' : 'Turn the main insights into action.',
+                keyMessage: isCjk ? '把关键结论转化为行动。' : 'Turn the main insights into action.',
+                slideRole: 'next_step',
+                sourceRefs: [],
+            },
+            deckTitle,
+            mode,
+            preferences,
+        );
+    }
+
+    private buildNextStepBullets(brief: DeckBrief, isCjk: boolean): string[] {
+        if (isCjk) {
+            return [
+                '回顾本次内容的核心结论',
+                `围绕${this.mapFocusLabelZh(brief.focus)}明确后续讨论重点`,
+                '根据受众需要补充案例、数据或实施方案',
+            ];
+        }
+
+        return [
+            'Revisit the core takeaway from this deck',
+            `Prioritize the next discussion around ${this.mapFocusLabel(brief.focus)}`,
+            'Add supporting examples, data, or execution details for the audience',
+        ];
+    }
+
+    private mergePlannedDocument(
+        heuristic: DocumentData,
+        llmPlan: PlannedDocument,
+        mode: PlannerMode,
+        preferences: PlanningPreferences,
+    ): DocumentData {
+        const mergedBrief: DeckBrief = {
+            ...(heuristic.brief as DeckBrief),
+            ...(llmPlan.brief || {}),
+            chapterTitles: (llmPlan.brief?.chapterTitles || (heuristic.brief as DeckBrief).chapterTitles || []).filter(Boolean),
+            coreTakeaways: (llmPlan.brief?.coreTakeaways || (heuristic.brief as DeckBrief).coreTakeaways || []).filter(Boolean),
+        };
+
+        const slides = llmPlan.slides.map((planned, index) => {
+            const fallback = this.findFallbackSlide(heuristic.slides, planned.sourceRefs, index);
+            return this.enrichSlideForRole(
+                {
+                    ...fallback,
+                    title: planned.title || fallback?.title || `Slide ${index + 1}`,
+                    bullets: planned.bullets.length > 0 ? planned.bullets : fallback?.bullets || [],
+                    summary: planned.summary || fallback?.summary || '',
+                    keyMessage: planned.keyMessage || fallback?.keyMessage || planned.title,
+                    slideRole: planned.slideRole || fallback?.slideRole || 'content',
+                    layout: planned.layout || fallback?.layout,
+                    imageIntent: planned.imageIntent || fallback?.imageIntent,
+                    imagePrompt: planned.imagePrompt || fallback?.imagePrompt,
+                    sourceRefs: planned.sourceRefs.length > 0 ? planned.sourceRefs : fallback?.sourceRefs || [],
+                    speakerNotes: planned.speakerNotes.length > 0 ? planned.speakerNotes : fallback?.speakerNotes || [],
+                    images: fallback?.images || [],
+                    level: fallback?.level,
+                    breadcrumb: fallback?.breadcrumb,
+                    sourceIndex: fallback?.sourceIndex,
+                },
+                heuristic.title,
+                mode,
+                preferences,
+            );
+        });
+
+        const closedSlides = this.ensureClosingSlides(slides, mergedBrief, heuristic.title, mode, preferences);
+
+        return {
+            title: llmPlan.title || heuristic.title,
+            brief: mergedBrief,
+            understanding: heuristic.understanding,
+            slides: this.ensureUniqueTitles(closedSlides),
+        };
+    }
+
+    private findFallbackSlide(slides: SlideContent[], sourceRefs: number[], index: number): SlideContent | undefined {
+        if (sourceRefs.length > 0) {
+            const mapped = slides.find((slide) =>
+                (slide.sourceRefs || [slide.sourceIndex || 0]).some((ref) => sourceRefs.includes(ref)),
+            );
+            if (mapped) {
+                return mapped;
+            }
+        }
+
+        return slides[index];
+    }
+
+    private async expandSparseSlidesIfNeeded(
+        docData: DocumentData,
+        mode: PlannerMode,
+        preferences: PlanningPreferences,
+    ): Promise<DocumentData> {
+        if (!this.sparseExpansionEnabled) {
+            return docData;
+        }
+
+        const sparseIndexes = this.collectSparseSlideIndexes(docData.slides);
+        if (sparseIndexes.length === 0) {
+            return docData;
+        }
+
+        const heuristicExpanded = this.applyHeuristicSparseExpansion(docData, sparseIndexes, mode, preferences);
+        const token = await this.resolveAuthToken();
+        if (!token) {
+            return heuristicExpanded;
+        }
+
+        const expandedByLlm = await this.generateSparseExpansionWithGemini(
+            heuristicExpanded,
+            sparseIndexes,
+            mode,
+            token,
+            preferences,
+        );
+        if (expandedByLlm.size === 0) {
+            return heuristicExpanded;
+        }
+
+        return this.applySparseExpansion(heuristicExpanded, expandedByLlm, mode, preferences);
+    }
+
+    private collectSparseSlideIndexes(slides: SlideContent[]): number[] {
+        const skipRoles = new Set<SlideRole>(['agenda', 'section_divider', 'summary', 'next_step']);
+        const indexes: number[] = [];
+
+        slides.forEach((slide, idx) => {
+            if (skipRoles.has(slide.slideRole || 'content')) {
+                return;
+            }
+
+            const bulletCount = slide.bullets.filter((bullet) => this.cleanText(bullet, 160).length > 0).length;
+            const summaryLength = this.cleanText(slide.summary || '', 160).length;
+            const keyMessageLength = this.cleanText(slide.keyMessage || '', 160).length;
+            const textLength = this.cleanText(`${slide.title} ${slide.summary || ''} ${slide.bullets.join(' ')}`, 500).length;
+            const isSparse = bulletCount <= 1 || textLength < 85 || (summaryLength + keyMessageLength < 45 && bulletCount < 2);
+
+            if (isSparse) {
+                indexes.push(idx + 1);
+            }
+        });
+
+        return indexes;
+    }
+
+    private applyHeuristicSparseExpansion(
+        docData: DocumentData,
+        sparseIndexes: number[],
+        mode: PlannerMode,
+        preferences: PlanningPreferences,
+    ): DocumentData {
+        const sparseSet = new Set<number>(sparseIndexes);
+        const slides = docData.slides.map((slide, idx) => {
+            if (!sparseSet.has(idx + 1)) {
+                return slide;
+            }
+
+            const prevTitle = idx > 0 ? this.cleanText(docData.slides[idx - 1].title, 60) : '';
+            const nextTitle = idx + 1 < docData.slides.length ? this.cleanText(docData.slides[idx + 1].title, 60) : '';
+            const title = this.cleanText(slide.title, 80) || `Slide ${idx + 1}`;
+            const existingBullets = this.normalizeBullets(slide.bullets, preferences.deckFormat === 'presenter' ? 4 : 6);
+            const fallbackBullets = [
+                this.cleanText(`${title}: background and context`, 80),
+                prevTitle ? this.cleanText(`Connects from ${prevTitle}`, 80) : '',
+                nextTitle ? this.cleanText(`Leads into ${nextTitle}`, 80) : '',
+                mode === 'creative'
+                    ? this.cleanText(`${title}: practical takeaway for the audience`, 80)
+                    : this.cleanText(`${title}: key takeaway`, 80),
+            ].filter(Boolean);
+
+            const maxBullets = preferences.deckFormat === 'presenter' ? 4 : 6;
+            const bullets = this.normalizeBullets([...existingBullets, ...fallbackBullets], maxBullets);
+            const keyMessage =
+                this.cleanText(slide.keyMessage || slide.summary || bullets[0] || title, 140) ||
+                this.cleanText(`${title}: key message`, 140);
+            const summary = this.selectSummary(slide.summary || keyMessage, bullets, title);
+
+            return {
+                ...slide,
+                bullets,
+                keyMessage,
+                summary,
+                speakerNotes: this.buildSpeakerNotes(title, keyMessage, bullets, slide.slideRole || 'content', preferences),
+            };
+        });
+
+        return {
+            ...docData,
+            slides,
+        };
+    }
+
+    private async generateSparseExpansionWithGemini(
+        docData: DocumentData,
+        sparseIndexes: number[],
+        mode: PlannerMode,
+        token: string,
+        preferences: PlanningPreferences,
+    ): Promise<Map<number, SparseExpansionSlide>> {
+        if (this.canUseWorkerProxy()) {
+            const viaWorker = await this.generateSparseExpansionWithWorkerProxy(docData, sparseIndexes, mode, preferences);
+            if (viaWorker.size > 0) {
+                return viaWorker;
+            }
+        }
+
+        const targetSlides = sparseIndexes.map((index) => {
+            const slide = docData.slides[index - 1];
+            return {
+                index,
+                title: slide.title,
+                slideRole: slide.slideRole || 'content',
+                keyMessage: slide.keyMessage || '',
+                summary: slide.summary || '',
+                bullets: slide.bullets,
+                prevTitle: index > 1 ? docData.slides[index - 2]?.title || '' : '',
+                nextTitle: index < docData.slides.length ? docData.slides[index]?.title || '' : '',
+                deckGoal: docData.brief?.deckGoal || '',
+            };
+        });
+
+        const rules = [
+            'You are revising weak PPT slides.',
+            'Task: expand sparse slides using local deck context.',
+            'Do not add unsupported facts, dates, statistics, or named entities.',
+            `Deck format: ${preferences.deckFormat}.`,
+            mode === 'creative'
+                ? 'Mode creative: improve flow and phrasing while staying source-grounded.'
+                : 'Mode strict: stay very close to source meaning.',
+            'Return 2-4 concise bullets for presenter decks, 3-6 bullets for detailed decks.',
+            'Return valid JSON only.',
+            'Schema: {"slides":[{"index":1,"keyMessage":"string","summary":"string","bullets":["..."]}]}',
+        ].join('\n');
+
+        const payload = {
+            prompt: `${rules}\n\nTarget slides:\n${JSON.stringify(targetSlides, null, 2)}`,
+            temperature: mode === 'creative' ? 0.35 : 0.15,
+            model: this.model,
+            stream: false,
+        };
+
+        try {
+            const response = await axios.post(`${this.baseUrl}/api/llm/direct`, payload, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${token}`,
+                },
+                timeout: 120000,
+                proxy: false,
+                validateStatus: () => true,
+            });
+
+            if (response.status !== 200 || response.data?.success === false) {
+                console.warn(
+                    `Sparse expansion API failed: status=${response.status}, message=${response.data?.message || 'unknown'}`,
+                );
+                return new Map<number, SparseExpansionSlide>();
+            }
+
+            const rawText = this.extractModelText(response.data);
+            if (!rawText) {
+                return new Map<number, SparseExpansionSlide>();
+            }
+
+            return this.parseSparseExpansion(rawText, preferences);
+        } catch (error: any) {
+            console.warn('Sparse expansion request failed:', error?.message || error);
+            return new Map<number, SparseExpansionSlide>();
+        }
+    }
+
+    private async generateSparseExpansionWithWorkerProxy(
+        docData: DocumentData,
+        sparseIndexes: number[],
+        mode: PlannerMode,
+        preferences: PlanningPreferences,
+    ): Promise<Map<number, SparseExpansionSlide>> {
+        const targetSlides = sparseIndexes.map((index) => {
+            const slide = docData.slides[index - 1];
+            return {
+                index,
+                title: slide.title,
+                slideRole: slide.slideRole || 'content',
+                keyMessage: slide.keyMessage || '',
+                summary: slide.summary || '',
+                bullets: slide.bullets,
+                prevTitle: index > 1 ? docData.slides[index - 2]?.title || '' : '',
+                nextTitle: index < docData.slides.length ? docData.slides[index]?.title || '' : '',
+                deckGoal: docData.brief?.deckGoal || '',
+            };
+        });
+
+        const rules = [
+            'You are revising weak PPT slides.',
+            'Task: expand sparse slides using local deck context.',
+            'Do not add unsupported facts, dates, statistics, or named entities.',
+            `Deck format: ${preferences.deckFormat}.`,
+            mode === 'creative'
+                ? 'Mode creative: improve flow and phrasing while staying source-grounded.'
+                : 'Mode strict: stay very close to source meaning.',
+            'Return valid JSON only.',
+            'Schema: {"slides":[{"index":1,"keyMessage":"string","summary":"string","bullets":["..."]}]}',
+        ].join('\n');
+
+        try {
+            const text = await this.callGeminiViaWorker(
+                `${rules}\n\nTarget slides:\n${JSON.stringify(targetSlides, null, 2)}`,
+                mode === 'creative' ? 0.35 : 0.15,
+            );
+            if (!text) {
+                return new Map<number, SparseExpansionSlide>();
+            }
+
+            return this.parseSparseExpansion(text, preferences);
+        } catch (error: any) {
+            console.warn('Sparse expansion worker proxy request failed:', error?.message || error);
+            return new Map<number, SparseExpansionSlide>();
+        }
+    }
+
+    private parseSparseExpansion(raw: string, preferences: PlanningPreferences): Map<number, SparseExpansionSlide> {
+        const mapped = new Map<number, SparseExpansionSlide>();
+        const jsonText = this.extractJsonBlock(raw);
+        if (!jsonText) {
+            return mapped;
+        }
+
+        try {
+            const parsed = JSON.parse(jsonText);
+            const slides = Array.isArray(parsed?.slides) ? parsed.slides : [];
+            slides.forEach((item: any) => {
+                const index = Number(item?.index);
+                if (!Number.isFinite(index) || index < 1) {
+                    return;
+                }
+
+                const bullets = this.normalizeBullets(
+                    Array.isArray(item?.bullets) ? item.bullets : [],
+                    preferences.deckFormat === 'presenter' ? 4 : 6,
+                );
+                const keyMessage = this.cleanText(item?.keyMessage, 140);
+                const summary = this.cleanText(item?.summary, 140);
+                if (bullets.length === 0 && !summary && !keyMessage) {
+                    return;
+                }
+
+                mapped.set(index, {
+                    index,
+                    keyMessage,
+                    summary,
+                    bullets,
+                });
+            });
+        } catch {
+            return mapped;
+        }
+
+        return mapped;
+    }
+
+    private applySparseExpansion(
+        docData: DocumentData,
+        expandedByLlm: Map<number, SparseExpansionSlide>,
+        mode: PlannerMode,
+        preferences: PlanningPreferences,
+    ): DocumentData {
+        const slides = docData.slides.map((slide, idx) => {
+            const expansion = expandedByLlm.get(idx + 1);
+            if (!expansion) {
+                return slide;
+            }
+
+            const maxBullets = preferences.deckFormat === 'presenter' ? 4 : 6;
+            const mergedBullets = this.normalizeBullets([...slide.bullets, ...expansion.bullets], maxBullets);
+            const fallbackBullets =
+                mergedBullets.length >= 2
+                    ? mergedBullets
+                    : this.normalizeBullets(
+                          [
+                              ...mergedBullets,
+                              `${slide.title}: key information`,
+                              mode === 'creative' ? `${slide.title}: audience takeaway` : `${slide.title}: key takeaway`,
+                          ],
+                          maxBullets,
+                      );
+            const keyMessage =
+                expansion.keyMessage ||
+                this.cleanText(slide.keyMessage || slide.summary || fallbackBullets[0] || slide.title, 140);
+            const summary = this.selectSummary(expansion.summary || slide.summary || keyMessage, fallbackBullets, slide.title);
+
+            return {
+                ...slide,
+                bullets: fallbackBullets,
+                keyMessage,
+                summary,
+                speakerNotes: this.buildSpeakerNotes(
+                    slide.title,
+                    keyMessage,
+                    fallbackBullets,
+                    slide.slideRole || 'content',
+                    preferences,
+                ),
+            };
+        });
+
+        return {
+            ...docData,
+            slides,
+        };
+    }
+
+    private buildSpeakerNotes(
+        title: string,
+        keyMessage: string,
+        bullets: string[],
+        slideRole: SlideRole,
+        preferences: PlanningPreferences,
+    ): string[] {
+        const notes: string[] = [];
+        const cleanTitle = this.cleanText(title, 80);
+        const cleanMessage = this.cleanText(keyMessage, 140);
+        if (cleanMessage) {
+            notes.push(`Primary message: ${cleanMessage}`);
+        }
+
+        if (preferences.deckFormat === 'presenter') {
+            if (bullets[0]) notes.push(`Open with ${cleanTitle} and explain why it matters.`);
+            if (bullets[1]) notes.push(`Expand on: ${this.cleanText(bullets[1], 120)}`);
+            if (slideRole === 'summary' || slideRole === 'next_step') {
+                notes.push('Close with a clear recommendation or action cue.');
+            }
+        } else {
+            bullets.slice(0, 3).forEach((bullet) => {
+                notes.push(`Supporting detail: ${this.cleanText(bullet, 140)}`);
+            });
+        }
+
+        return notes.slice(0, 4);
+    }
+
+    private normalizeBullets(bullets: string[], maxItems: number): string[] {
+        const unique = new Set<string>();
+        const normalized: string[] = [];
+
+        for (const raw of bullets) {
+            const text = this.cleanText(raw, 120);
+            if (!text) continue;
+            const key = this.normalizeForCompare(text);
+            if (!key || unique.has(key)) continue;
+            unique.add(key);
+            normalized.push(text);
+        }
+
+        return normalized.slice(0, maxItems);
+    }
+
+    private selectSummary(summary: string, bullets: string[], title: string): string {
+        const cleaned = this.cleanText(summary, 140);
+        if (!cleaned) return '';
+        const normalizedSummary = this.normalizeForCompare(cleaned);
+        const bulletNormalized = bullets.map((bullet) => this.normalizeForCompare(bullet));
+        if (bulletNormalized.includes(normalizedSummary)) {
+            return '';
+        }
+        if (normalizedSummary === this.normalizeForCompare(title)) {
+            return '';
+        }
+        return cleaned;
+    }
+
+    private normalizeSourceRefs(input: any): number[] {
+        if (!Array.isArray(input)) {
+            return [];
+        }
+
+        return Array.from(
+            new Set(
+                input
+                    .map((item) => Number(item))
+                    .filter((item) => Number.isFinite(item) && item > 0)
+                    .map((item) => Math.floor(item)),
+            ),
+        ).slice(0, 8);
+    }
+
+    private normalizeStringList(input: any, maxItems: number, maxLength: number): string[] {
+        if (!Array.isArray(input)) {
+            return [];
+        }
+
+        return input
+            .map((item) => this.cleanText(item, maxLength))
+            .filter(Boolean)
+            .slice(0, maxItems);
+    }
+
+    private normalizeSlideRole(input: any): SlideRole {
+        switch (String(input || '').trim()) {
+            case 'agenda':
+            case 'section_divider':
+            case 'key_insight':
+            case 'timeline':
+            case 'comparison':
+            case 'process':
+            case 'data_highlight':
+            case 'summary':
+            case 'next_step':
+                return input;
+            default:
+                return 'content';
+        }
+    }
+
+    private normalizeLayout(layout: any, slideRole: SlideRole): SlideLayoutType {
+        if (layout === 'image_only') {
+            return 'image_only';
+        }
+        if (slideRole === 'section_divider' || slideRole === 'key_insight') {
+            return 'image_only';
+        }
+        return 'image_overlay';
+    }
+
+    private heuristicLayout(
+        title: string,
+        bullets: string[],
+        slideRole: SlideRole,
+        preferences: PlanningPreferences,
+    ): SlideLayoutType {
+        if (slideRole === 'section_divider' || slideRole === 'key_insight') {
+            return 'image_only';
+        }
+        if (
+            slideRole === 'timeline' ||
+            slideRole === 'comparison' ||
+            slideRole === 'process' ||
+            slideRole === 'summary' ||
+            slideRole === 'next_step'
+        ) {
+            return 'image_overlay';
+        }
+
+        const textSize = title.length + bullets.reduce((sum, bullet) => sum + bullet.length, 0);
+        if (preferences.deckFormat === 'presenter' && (bullets.length > 4 || textSize > 180)) {
+            return 'image_only';
+        }
+        return 'image_overlay';
+    }
+
+    private buildRoleAwareImagePrompt(
+        deckTitle: string,
+        title: string,
+        keyMessage: string,
+        bullets: string[],
+        slideRole: SlideRole,
+        mode: PlannerMode,
+        preferences: PlanningPreferences,
+    ): string {
+        const style =
+            preferences.style === 'bold'
+                ? 'bold editorial'
+                : preferences.style === 'educational'
+                  ? 'clean educational'
+                  : 'professional cinematic';
+        const keywordSeed = [title, keyMessage, ...bullets.slice(0, 2).map((bullet) => this.cleanText(bullet, 80))]
+            .filter(Boolean)
+            .join('; ');
+
+        if (slideRole === 'agenda' || slideRole === 'summary' || slideRole === 'next_step') {
+            return `${keywordSeed}; ${style} 16:9 presentation background for ${deckTitle}, abstract shapes, clear focal point, no text, no watermark.`;
+        }
+
+        if (slideRole === 'section_divider') {
+            return `${keywordSeed}; ${style} 16:9 section divider visual for ${title}, thematic atmosphere, minimal composition, no text, no watermark.`;
+        }
+
+        if (slideRole === 'timeline') {
+            return `${keywordSeed}; ${style} 16:9 visual about ${title}, showing evolution and progression, no text, no watermark.`;
+        }
+
+        if (slideRole === 'comparison') {
+            return `${keywordSeed}; ${style} 16:9 visual illustrating contrast and comparison for ${title}, balanced dual composition, no text, no watermark.`;
+        }
+
+        if (slideRole === 'process') {
+            return `${keywordSeed}; ${style} 16:9 process illustration for ${title}, step-by-step movement, structured composition, no text, no watermark.`;
+        }
+
+        if (slideRole === 'data_highlight') {
+            return `${keywordSeed}; ${style} 16:9 visual emphasizing a key metric for ${title}, polished infographic mood, no text, no watermark.`;
+        }
+
+        return `${keywordSeed}; ${mode === 'creative' ? 'cinematic' : 'professional'} ${style} 16:9 slide visual about ${title}. No text, no watermark.`;
+    }
+
+    private looksLikeTimeline(slide: SlideContent): boolean {
+        const text = `${slide.title} ${slide.summary || ''} ${slide.bullets.join(' ')}`;
+        return /\b(18|19|20)\d{2}\b|年|阶段|历程|演进|发展史|timeline|history/i.test(text);
+    }
+
+    private looksLikeComparison(slide: SlideContent): boolean {
+        const text = `${slide.title} ${slide.summary || ''} ${slide.bullets.join(' ')}`;
+        return /对比|比较|区别|差异|优势|劣势|vs\b|versus|compare/i.test(text);
+    }
+
+    private looksLikeProcess(slide: SlideContent): boolean {
+        const text = `${slide.title} ${slide.summary || ''} ${slide.bullets.join(' ')}`;
+        const numberedBullets = slide.bullets.filter((bullet) => /^\s*\d+[.)、]/.test(bullet)).length;
+        return numberedBullets >= 2 || /流程|步骤|方法|实施|推进|落地|step\b|process|workflow/i.test(text);
+    }
+
+    private looksLikeDataHighlight(slide: SlideContent): boolean {
+        const text = `${slide.title} ${slide.summary || ''} ${slide.bullets.join(' ')}`;
+        const matches = text.match(/\b\d+(?:\.\d+)?%?\b/g) || [];
+        return matches.length >= 2 && slide.bullets.length <= 4;
+    }
+
+    private isSectionDividerCandidate(slide: SlideContent, index: number, allSlides: SlideContent[]): boolean {
+        if (index === 0) return false;
+        const level = slide.level || 1;
+        if (level > 2) return false;
+        const prevLevel = allSlides[index - 1]?.level || 1;
+        return level <= prevLevel && slide.bullets.length <= 3 && this.cleanText(slide.title, 80).length <= 28;
+    }
+
+    private ensureUniqueTitles(slides: SlideContent[]): SlideContent[] {
+        const seen = new Set<string>();
+        return slides.map((slide, index) => {
+            const base = this.cleanText(slide.title, 80) || `Slide ${index + 1}`;
+            let candidate = base;
+            let probe = candidate.toLowerCase();
+            let dup = 1;
+
+            while (seen.has(probe)) {
+                const suffix = slide.slideRole ? slide.slideRole.replace(/_/g, ' ') : 'slide';
+                candidate = `${base} - ${suffix}${dup > 1 ? ` ${dup}` : ''}`;
+                probe = candidate.toLowerCase();
+                dup += 1;
+            }
+
+            seen.add(probe);
+            return {
+                ...slide,
+                title: candidate,
+            };
+        });
+    }
+
+    private strengthenNarrativeContinuity(slides: SlideContent[], deckTitle: string): SlideContent[] {
+        let prevLevel = 1;
+
+        return slides.map((slide, index) => {
+            const role = slide.slideRole || 'content';
+            let nextLevel =
+                typeof slide.level === 'number' && slide.level > 0
+                    ? Math.round(slide.level)
+                    : this.defaultLevelForRole(role, prevLevel, index);
+
+            if (index === 0) {
+                nextLevel = 1;
+            }
+
+            if (Math.abs(nextLevel - prevLevel) > 1) {
+                nextLevel = nextLevel > prevLevel ? prevLevel + 1 : prevLevel - 1;
+            }
+
+            nextLevel = Math.max(1, Math.min(3, nextLevel));
+            const breadcrumb = this.cleanText(slide.breadcrumb || this.buildDefaultBreadcrumb(deckTitle, slide.title, role), 80);
+
+            prevLevel = nextLevel;
+            return {
+                ...slide,
+                level: nextLevel,
+                breadcrumb,
+            };
+        });
+    }
+
+    private defaultLevelForRole(role: SlideRole, prevLevel: number, index: number): number {
+        if (index === 0 || role === 'agenda') {
+            return 1;
+        }
+        if (role === 'section_divider') {
+            return Math.min(prevLevel + 1, 2);
+        }
+        if (role === 'summary' || role === 'next_step') {
+            return prevLevel;
+        }
+        if (role === 'timeline' || role === 'comparison' || role === 'process' || role === 'data_highlight') {
+            return Math.max(2, prevLevel);
+        }
+        return Math.max(1, Math.min(2, prevLevel));
+    }
+
+    private buildDefaultBreadcrumb(deckTitle: string, title: string, role: SlideRole): string {
+        const cleanDeck = this.cleanText(deckTitle, 36) || 'Presentation';
+        const cleanTitle = this.cleanText(title, 36) || 'Slide';
+
+        switch (role) {
+            case 'agenda':
+                return `${cleanDeck} / Agenda`;
+            case 'section_divider':
+                return `${cleanDeck} / Section`;
+            case 'timeline':
+                return `${cleanDeck} / Timeline`;
+            case 'comparison':
+                return `${cleanDeck} / Comparison`;
+            case 'process':
+                return `${cleanDeck} / Process`;
+            case 'data_highlight':
+                return `${cleanDeck} / Highlight`;
+            case 'summary':
+                return `${cleanDeck} / Wrap-up`;
+            case 'next_step':
+                return `${cleanDeck} / Action`;
+            case 'key_insight':
+                return `${cleanDeck} / Insight`;
+            default:
+                return `${cleanDeck} / ${cleanTitle}`;
+        }
+    }
+
+    private isMostlyCjk(text: string): boolean {
+        const cleaned = this.cleanText(text, 200);
+        const matches = cleaned.match(/[\u4e00-\u9fff]/g) || [];
+        return matches.length >= Math.max(2, Math.floor(cleaned.length / 5));
+    }
+
+    private mapAudienceLabel(audience: DeckAudience): string {
+        switch (audience) {
+            case 'beginner':
+                return 'beginners';
+            case 'executive':
+                return 'decision-makers';
+            case 'student':
+                return 'learners';
+            case 'technical':
+                return 'technical readers';
+            default:
+                return 'the audience';
+        }
+    }
+
+    private mapFocusLabel(focus: DeckFocus): string {
+        switch (focus) {
+            case 'timeline':
+                return 'a timeline-focused';
+            case 'argument':
+                return 'an argument-led';
+            case 'process':
+                return 'a process-oriented';
+            case 'comparison':
+                return 'a comparison-driven';
+            default:
+                return 'an overview-driven';
+        }
+    }
+
+    private mapFocusLabelZh(focus: DeckFocus): string {
+        switch (focus) {
+            case 'timeline':
+                return '时间线';
+            case 'argument':
+                return '论点';
+            case 'process':
+                return '流程';
+            case 'comparison':
+                return '对比';
+            default:
+                return '全局概览';
         }
     }
 
@@ -197,647 +1385,67 @@ export class PlannerService {
         return this.fallbackAuthToken;
     }
 
-    private buildUserPrompt(docData: DocumentData, mode: PlannerMode): string {
-        const compactSlides = docData.slides.map((slide, idx) => ({
-            index: idx + 1,
-            title: slide.title,
-            bullets: slide.bullets,
-            level: slide.level || 1,
-            breadcrumb: slide.breadcrumb || '',
-        }));
-
-        const rules = [
-            'Task: build a slide-by-slide planning JSON for a PPT generator.',
-            'Must keep slide order and hierarchy. Do NOT merge, split, or reorder slides.',
-            'Each output slide index must match input index.',
-            ...this.buildModeRules(mode),
-            'layout must be one of: image_overlay, image_only.',
-            'imagePrompt must be <= 220 chars, concise, visual, no text/watermark.',
-            'Output schema:',
-            '{"title":"string","slides":[{"index":1,"title":"string","summary":"string","bullets":["..."],"layout":"image_overlay","imageIntent":"string","imagePrompt":"string"}]}',
-        ].join('\n');
-
-        return `${rules}\n\nDocument:\n${JSON.stringify({ title: docData.title, slides: compactSlides }, null, 2)}`;
-    }
-
-    private extractModelText(payload: any): string {
-        if (!payload) return '';
-        if (typeof payload === 'string') return payload;
-        if (typeof payload.data === 'string') return payload.data;
-        if (payload.data?.reply) return String(payload.data.reply);
-        if (payload.data?.text) return String(payload.data.text);
-        if (payload.data?.content) return String(payload.data.content);
-        if (payload.reply) return String(payload.reply);
-        if (payload.message && typeof payload.message === 'string' && payload.message.trim().startsWith('{')) {
-            return payload.message;
-        }
-
-        const choiceText = payload.choices?.[0]?.message?.content || payload.choices?.[0]?.text;
-        if (typeof choiceText === 'string') return choiceText;
-        
-        const dataChoiceText = payload.data?.choices?.[0]?.message?.content || payload.data?.choices?.[0]?.text;
-        if (typeof dataChoiceText === 'string') return dataChoiceText;
-        
-        return '';
-    }
-
-    private parsePlannedDocument(raw: string): PlannedDocument | null {
-        const jsonText = this.extractJsonBlock(raw);
-        if (!jsonText) return null;
-
-        try {
-            const parsed = JSON.parse(jsonText);
-            if (!parsed || !Array.isArray(parsed.slides)) return null;
-
-            const slides: PlannedSlide[] = parsed.slides
-                .map((slide: any) => this.normalizePlannedSlide(slide))
-                .filter((slide: PlannedSlide | null): slide is PlannedSlide => Boolean(slide));
-
-            if (slides.length === 0) return null;
-            return {
-                title: typeof parsed.title === 'string' ? this.cleanText(parsed.title, 80) : undefined,
-                slides,
-            };
-        } catch {
-            return null;
-        }
-    }
-
-    private normalizePlannedSlide(input: any): PlannedSlide | null {
-        const index = Number(input?.index);
-        if (!Number.isFinite(index) || index < 1) {
-            return null;
-        }
-
-        const title = this.cleanText(input?.title, 60);
-        const summary = this.cleanText(input?.summary, 120);
-        const bullets = this.normalizeBullets(Array.isArray(input?.bullets) ? input.bullets : []);
-        const layout = this.normalizeLayout(input?.layout);
-        const imageIntent = this.cleanText(input?.imageIntent, 160);
-        const imagePrompt = this.cleanText(input?.imagePrompt, 220);
-
+    private resolvePlanningPreferences(options: PlannerOptions): PlanningPreferences {
         return {
-            index,
-            title: title || `Slide ${index}`,
-            summary: this.selectSummary(summary || title || `Slide ${index}`, bullets, title),
-            bullets,
-            layout,
-            imageIntent: imageIntent || title,
-            imagePrompt: imagePrompt || this.cleanText(`${title}. ${bullets.slice(0, 2).join(' ')}`, 220),
+            deckFormat: this.normalizeDeckFormat(options.deckFormat || process.env.PLANNER_DECK_FORMAT),
+            audience: this.normalizeAudience(options.audience || process.env.PLANNER_AUDIENCE),
+            focus: this.normalizeFocus(options.focus || process.env.PLANNER_FOCUS),
+            style: this.normalizeStyle(options.style || process.env.PLANNER_STYLE),
+            length: this.normalizeLength(options.length || process.env.PLANNER_LENGTH),
         };
     }
 
-    private normalizeLayout(layout: any): SlideLayoutType {
-        return layout === 'image_only' ? 'image_only' : 'image_overlay';
+    private normalizeDeckFormat(input?: any): DeckFormat {
+        return input === 'detailed' ? 'detailed' : 'presenter';
     }
 
-    private extractJsonBlock(raw: string): string {
-        const fenced = raw.match(/```json\s*([\s\S]*?)\s*```/i) || raw.match(/```\s*([\s\S]*?)\s*```/i);
-        if (fenced?.[1]) {
-            return fenced[1].trim();
-        }
-
-        const firstBrace = raw.indexOf('{');
-        const lastBrace = raw.lastIndexOf('}');
-        if (firstBrace >= 0 && lastBrace > firstBrace) {
-            return raw.slice(firstBrace, lastBrace + 1);
-        }
-
-        return '';
-    }
-
-    private buildHeuristicPlan(docData: DocumentData, mode: PlannerMode): DocumentData {
-        const rawSlides = docData.slides.map((slide, idx) => {
-            const title = this.cleanText(slide.title, 60) || `Slide ${idx + 1}`;
-            const bullets = this.normalizeBullets(slide.bullets);
-            const summary = this.buildHeuristicSummary(title, bullets, mode);
-            const layout = this.heuristicLayout(title, bullets);
-            const imageIntent = this.cleanText(
-                [slide.breadcrumb, title, bullets.slice(0, 2).join(' ')].filter(Boolean).join(' | '),
-                160,
-            );
-            const imagePrompt = this.heuristicImagePrompt(title, bullets, slide.breadcrumb, mode);
-
-            return {
-                ...slide,
-                title,
-                bullets,
-                summary,
-                layout,
-                imageIntent,
-                imagePrompt,
-                sourceIndex: idx + 1,
-            } as SlideContent;
-        });
-
-        const slides = this.ensureUniqueTitles(rawSlides);
-        return {
-            title: this.cleanText(docData.title, 80) || 'Presentation',
-            slides,
-        };
-    }
-
-    private mergePlan(base: DocumentData, llmPlan: PlannedDocument): DocumentData {
-        const byIndex = new Map<number, PlannedSlide>();
-        llmPlan.slides.forEach((slide) => byIndex.set(slide.index, slide));
-
-        const mergedSlides = base.slides.map((baseSlide, idx) => {
-            const planned = byIndex.get(idx + 1);
-            if (!planned) {
-                return baseSlide;
-            }
-
-            const bullets = planned.bullets.length > 0 ? planned.bullets : baseSlide.bullets;
-            const title = planned.title || baseSlide.title;
-            const summary = this.selectSummary(planned.summary || baseSlide.summary || '', bullets, title);
-            return {
-                ...baseSlide,
-                title,
-                summary,
-                bullets,
-                layout: planned.layout || baseSlide.layout,
-                imageIntent: planned.imageIntent || baseSlide.imageIntent,
-                imagePrompt: planned.imagePrompt || baseSlide.imagePrompt,
-                sourceIndex: idx + 1,
-            } as SlideContent;
-        });
-
-        const slides = this.ensureUniqueTitles(mergedSlides);
-        return {
-            title: llmPlan.title || base.title,
-            slides,
-        };
-    }
-
-    private async expandSparseSlidesIfNeeded(docData: DocumentData, mode: PlannerMode): Promise<DocumentData> {
-        if (!this.sparseExpansionEnabled) {
-            return docData;
-        }
-
-        const sparseIndexes = this.collectSparseSlideIndexes(docData.slides);
-        if (sparseIndexes.length === 0) {
-            return docData;
-        }
-
-        // Always apply a deterministic local expansion first to avoid empty pages.
-        const heuristicExpanded = this.applyHeuristicSparseExpansion(docData, sparseIndexes, mode);
-
-        const token = await this.resolveAuthToken();
-        if (!token) {
-            return heuristicExpanded;
-        }
-
-        const expandedByLlm = await this.generateSparseExpansionWithGemini(
-            heuristicExpanded,
-            sparseIndexes,
-            mode,
-            token,
-        );
-        if (expandedByLlm.size === 0) {
-            return heuristicExpanded;
-        }
-
-        return this.applySparseExpansion(heuristicExpanded, expandedByLlm, mode);
-    }
-
-    private collectSparseSlideIndexes(slides: SlideContent[]): number[] {
-        const indexes: number[] = [];
-        slides.forEach((slide, idx) => {
-            const bulletCount = slide.bullets.filter((b) => this.cleanText(b, 120).length > 0).length;
-            const summaryLength = this.cleanText(slide.summary || '', 160).length;
-            const textLength = this.cleanText(`${slide.title} ${slide.summary || ''} ${slide.bullets.join(' ')}`, 500)
-                .length;
-            const isLikelyCover = idx === 0 && bulletCount === 0 && summaryLength === 0;
-            const isSparse = bulletCount <= 1 || textLength < 85 || (summaryLength === 0 && bulletCount < 2);
-
-            if (!isLikelyCover && isSparse) {
-                indexes.push(idx + 1);
-            }
-        });
-        return indexes;
-    }
-
-    private applyHeuristicSparseExpansion(docData: DocumentData, sparseIndexes: number[], mode: PlannerMode): DocumentData {
-        const sparseSet = new Set<number>(sparseIndexes);
-        const slides = docData.slides.map((slide, idx) => {
-            const currentIndex = idx + 1;
-            if (!sparseSet.has(currentIndex)) {
-                return slide;
-            }
-
-            const title = this.cleanText(slide.title, 60) || `Slide ${currentIndex}`;
-            const existingBullets = this.normalizeBullets(slide.bullets);
-            const fallbackBullets = [
-                `${title}: background and context`,
-                `${title}: key points and impact`,
-                mode === 'creative' ? `${title}: practical takeaway` : '',
-            ]
-                .map((item) => this.cleanText(item, 80))
-                .filter(Boolean);
-
-            const bullets = this.normalizeBullets([...existingBullets, ...fallbackBullets]).slice(0, 4);
-            const summarySeed =
-                slide.summary ||
-                this.cleanText(`${title}. ${bullets.slice(0, 2).join(' ')}`, 120) ||
-                `${title} overview`;
-            const summary = this.selectSummary(summarySeed, bullets, title);
-
-            return {
-                ...slide,
-                bullets,
-                summary,
-            };
-        });
-
-        return {
-            ...docData,
-            slides,
-        };
-    }
-
-    private async generateSparseExpansionWithGemini(
-        docData: DocumentData,
-        sparseIndexes: number[],
-        mode: PlannerMode,
-        token: string,
-    ): Promise<Map<number, SparseExpansionSlide>> {
-        if (this.canUseWorkerProxy()) {
-            const viaWorker = await this.generateSparseExpansionWithWorkerProxy(docData, sparseIndexes, mode);
-            if (viaWorker.size > 0) {
-                return viaWorker;
-            }
-        }
-
-        const sparseSet = new Set<number>(sparseIndexes);
-        const targetSlides = docData.slides
-            .map((slide, idx) => ({ slide, idx: idx + 1 }))
-            .filter((item) => sparseSet.has(item.idx))
-            .map((item) => ({
-                index: item.idx,
-                title: item.slide.title,
-                summary: item.slide.summary || '',
-                bullets: item.slide.bullets,
-                level: item.slide.level || 1,
-                breadcrumb: item.slide.breadcrumb || '',
-                prevTitle: item.idx > 1 ? docData.slides[item.idx - 2]?.title || '' : '',
-                nextTitle: item.idx < docData.slides.length ? docData.slides[item.idx]?.title || '' : '',
-            }));
-
-        const rules = [
-            'Task: expand sparse PPT slides while staying faithful to source meaning.',
-            'Only process slide indexes provided in targetSlides.',
-            'Do not add unsupported facts, dates, numbers, or named entities.',
-            mode === 'creative'
-                ? 'Mode creative: make wording presentation-ready and add concise connective context.'
-                : 'Mode strict: keep wording very close to source meaning and avoid extra interpretation.',
-            'Each returned slide should contain 2-4 concise bullets.',
-            'Return valid JSON only with schema:',
-            '{"slides":[{"index":1,"summary":"string","bullets":["..."]}]}',
-        ].join('\n');
-
-        const systemPrompt = 'You are a presentation editor who expands sparse slides with grounded, concise content. Return JSON only.';
-        const userPrompt = `${rules}\n\nTarget document:\n${JSON.stringify({ title: docData.title, targetSlides }, null, 2)}`;
-        const combinedPrompt = `${systemPrompt}\n\n${userPrompt}`;
-
-        const payload = {
-            prompt: combinedPrompt,
-            temperature: mode === 'creative' ? 0.4 : 0.2,
-            model: this.model,
-            stream: false,
-        };
-
-        try {
-            console.log(`[LLM Sparse Expansion] Calling ${this.baseUrl}/api/llm/direct...`);
-            const response = await axios.post(`${this.baseUrl}/api/llm/direct`, payload, {
-                headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${token}`,
-                },
-                timeout: 120000,
-                proxy: false,
-                validateStatus: () => true,
-            });
-
-            if (response.status !== 200 || response.data?.success === false) {
-                console.warn(
-                    `Sparse expansion API failed: status=${response.status}, message=${response.data?.message || 'unknown'}`,
-                );
-                return new Map<number, SparseExpansionSlide>();
-            }
-
-            const rawText = this.extractModelText(response.data);
-            if (!rawText) {
-                return new Map<number, SparseExpansionSlide>();
-            }
-
-            return this.parseSparseExpansion(rawText);
-        } catch (error: any) {
-            console.warn('Sparse expansion request failed:', error?.message || error);
-            return new Map<number, SparseExpansionSlide>();
+    private normalizeAudience(input?: any): DeckAudience {
+        switch (String(input || '').trim()) {
+            case 'beginner':
+            case 'executive':
+            case 'student':
+            case 'technical':
+                return input;
+            default:
+                return 'general';
         }
     }
 
-    private parseSparseExpansion(raw: string): Map<number, SparseExpansionSlide> {
-        const mapped = new Map<number, SparseExpansionSlide>();
-        const jsonText = this.extractJsonBlock(raw);
-        if (!jsonText) {
-            return mapped;
-        }
-
-        try {
-            const parsed = JSON.parse(jsonText);
-            const slides = Array.isArray(parsed?.slides) ? parsed.slides : [];
-            slides.forEach((item: any) => {
-                const index = Number(item?.index);
-                if (!Number.isFinite(index) || index < 1) {
-                    return;
-                }
-
-                const bullets = this.normalizeBullets(Array.isArray(item?.bullets) ? item.bullets : []);
-                const summary = this.cleanText(item?.summary, 120);
-                if (bullets.length === 0 && !summary) {
-                    return;
-                }
-
-                mapped.set(index, {
-                    index,
-                    summary,
-                    bullets,
-                });
-            });
-        } catch {
-            return mapped;
-        }
-
-        return mapped;
-    }
-
-    private async generateSparseExpansionWithWorkerProxy(
-        docData: DocumentData,
-        sparseIndexes: number[],
-        mode: PlannerMode,
-    ): Promise<Map<number, SparseExpansionSlide>> {
-        const sparseSet = new Set<number>(sparseIndexes);
-        const targetSlides = docData.slides
-            .map((slide, idx) => ({ slide, idx: idx + 1 }))
-            .filter((item) => sparseSet.has(item.idx))
-            .map((item) => ({
-                index: item.idx,
-                title: item.slide.title,
-                summary: item.slide.summary || '',
-                bullets: item.slide.bullets,
-                level: item.slide.level || 1,
-                breadcrumb: item.slide.breadcrumb || '',
-                prevTitle: item.idx > 1 ? docData.slides[item.idx - 2]?.title || '' : '',
-                nextTitle: item.idx < docData.slides.length ? docData.slides[item.idx]?.title || '' : '',
-            }));
-
-        const rules = [
-            'Task: expand sparse PPT slides while staying faithful to source meaning.',
-            'Only process slide indexes provided in targetSlides.',
-            'Do not add unsupported facts, dates, numbers, or named entities.',
-            mode === 'creative'
-                ? 'Mode creative: make wording presentation-ready and add concise connective context.'
-                : 'Mode strict: keep wording very close to source meaning and avoid extra interpretation.',
-            'Each returned slide should contain 2-4 concise bullets.',
-            'Return valid JSON only with schema:',
-            '{"slides":[{"index":1,"summary":"string","bullets":["..."]}]}',
-        ].join('\n');
-
-        const prompt = `${rules}\n\nTarget document:\n${JSON.stringify({ title: docData.title, targetSlides }, null, 2)}`;
-        try {
-            const text = await this.callGeminiViaWorker(prompt, mode === 'creative' ? 0.4 : 0.2);
-            if (!text) {
-                return new Map<number, SparseExpansionSlide>();
-            }
-            return this.parseSparseExpansion(text);
-        } catch (error: any) {
-            console.warn('Sparse expansion worker proxy request failed:', error?.message || error);
-            return new Map<number, SparseExpansionSlide>();
+    private normalizeFocus(input?: any): DeckFocus {
+        switch (String(input || '').trim()) {
+            case 'timeline':
+            case 'argument':
+            case 'process':
+            case 'comparison':
+                return input;
+            default:
+                return 'overview';
         }
     }
 
-    private applySparseExpansion(
-        docData: DocumentData,
-        expandedByLlm: Map<number, SparseExpansionSlide>,
-        mode: PlannerMode,
-    ): DocumentData {
-        const slides = docData.slides.map((slide, idx) => {
-            const expansion = expandedByLlm.get(idx + 1);
-            if (!expansion) {
-                return slide;
-            }
-
-            const mergedBullets = this.normalizeBullets([...slide.bullets, ...expansion.bullets]);
-            const fallbackBullets =
-                mergedBullets.length >= 2
-                    ? mergedBullets
-                    : this.normalizeBullets([
-                          ...mergedBullets,
-                          `${slide.title}: key information`,
-                          mode === 'creative' ? `${slide.title}: narrative takeaway` : `${slide.title}: key takeaway`,
-                      ]);
-            const bullets = fallbackBullets.slice(0, 4);
-            const summarySeed =
-                expansion.summary ||
-                slide.summary ||
-                this.cleanText(`${slide.title}. ${bullets.slice(0, 2).join(' ')}`, 120);
-            const summary = this.selectSummary(summarySeed, bullets, slide.title);
-
-            return {
-                ...slide,
-                bullets,
-                summary,
-            };
-        });
-
-        return {
-            ...docData,
-            slides,
-        };
-    }
-
-    private normalizeBullets(bullets: string[]): string[] {
-        const unique = new Set<string>();
-        const normalized: string[] = [];
-
-        for (const raw of bullets) {
-            const text = this.cleanText(raw, 80);
-            if (!text) continue;
-            const key = this.normalizeForCompare(text);
-            if (!key) continue;
-            if (unique.has(key)) continue;
-            unique.add(key);
-            normalized.push(text);
+    private normalizeStyle(input?: any): DeckStyle {
+        switch (String(input || '').trim()) {
+            case 'minimal':
+            case 'bold':
+            case 'educational':
+                return input;
+            default:
+                return 'professional';
         }
-
-        return normalized.slice(0, 5);
     }
 
-    private buildHeuristicSummary(title: string, bullets: string[], mode: PlannerMode): string {
-        if (bullets.length === 0) {
-            return title;
+    private normalizeLength(input?: any): DeckLength {
+        switch (String(input || '').trim()) {
+            case 'short':
+            case 'long':
+                return input;
+            default:
+                return 'default';
         }
-
-        const base = title.replace(/[：:]\s*.*$/, '').trim() || title;
-        const summary = `${base}的关键变化与影响`;
-        const finalSummary =
-            mode === 'creative'
-                ? this.cleanText(`${title}. ${bullets.slice(0, 2).join(' ')}`, 120) || summary
-                : summary;
-        return this.selectSummary(finalSummary, bullets, title);
-    }
-
-    private selectSummary(summary: string, bullets: string[], title: string): string {
-        const cleaned = this.cleanText(summary, 120);
-        if (!cleaned) return '';
-        if (this.isRedundantSummary(cleaned, bullets, title)) return '';
-        return cleaned;
-    }
-
-    private isRedundantSummary(summary: string, bullets: string[], title: string): boolean {
-        const summaryNormalized = this.normalizeForCompare(summary);
-        if (!summaryNormalized) {
-            return true;
-        }
-
-        const stripped = this.normalizeForCompare(
-            summary.replace(new RegExp(`^\\s*${this.escapeRegExp(title)}\\s*[:：,，。\\-]*\\s*`), ''),
-        );
-        const candidates = [summaryNormalized, stripped].filter(Boolean);
-        for (const bullet of bullets) {
-            const bulletNormalized = this.normalizeForCompare(bullet);
-            if (!bulletNormalized) continue;
-            for (const candidate of candidates) {
-                if (!candidate) continue;
-                if (candidate === bulletNormalized) {
-                    return true;
-                }
-                if (candidate.length >= 8 && bulletNormalized.length >= 8) {
-                    if (candidate.includes(bulletNormalized) || bulletNormalized.includes(candidate)) {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        return false;
-    }
-
-    private normalizeForCompare(text: string): string {
-        return this.cleanText(text, 300)
-            .toLowerCase()
-            .replace(/[\s\p{P}\p{S}]+/gu, '');
-    }
-
-    private escapeRegExp(input: string): string {
-        return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    }
-
-    private heuristicLayout(title: string, bullets: string[]): SlideLayoutType {
-        const textSize = title.length + bullets.reduce((sum, b) => sum + b.length, 0);
-        if (bullets.length > 4 || textSize > 170) {
-            return 'image_only';
-        }
-        return 'image_overlay';
-    }
-
-    private heuristicImagePrompt(
-        title: string,
-        bullets: string[],
-        breadcrumb?: string,
-        mode: PlannerMode = 'strict',
-    ): string {
-        const combined = [title, ...bullets, breadcrumb || ''].join(' ');
-        if (this.isSensitiveEntity(combined)) {
-            const context = this.cleanText(this.stripSensitiveTerms(`${breadcrumb || ''} ${title}`), 52);
-            const era = /互联网|搜索|电商|邮件|聊天|平台/i.test(combined)
-                ? 'internet platform ecosystem'
-                : /PC|微机|处理器|台式|大型机|硬件/i.test(combined)
-                  ? 'early personal computer era'
-                  : 'technology industry development';
-
-            const prompt = [
-                `${mode === 'creative' ? 'Cinematic' : 'Professional'} 16:9 illustration of ${era}.`,
-                context ? `Theme keywords: ${context}.` : '',
-                mode === 'creative'
-                    ? 'Visual elements: iconic devices, team collaboration, layered data network, sense of momentum and innovation.'
-                    : 'Visual elements: computer devices, team collaboration, data network, innovation.',
-                'No text, no logo, no watermark.',
-            ]
-                .filter(Boolean)
-                .join(' ');
-
-            return this.cleanText(prompt, 220);
-        }
-
-        const ingredients = [title, ...bullets.slice(0, 2)].filter(Boolean).join('; ');
-        const prompt = [
-            `${mode === 'creative' ? 'Cinematic' : 'Professional'} 16:9 slide illustration about ${ingredients}.`,
-            breadcrumb ? `Context: ${this.cleanText(breadcrumb, 60)}.` : '',
-            mode === 'creative'
-                ? 'Modern, layered composition with clear focal point, polished lighting, no text, no watermark.'
-                : 'Modern, clean composition, no text, no watermark.',
-        ]
-            .filter(Boolean)
-            .join(' ');
-
-        return this.cleanText(prompt, 220);
-    }
-
-    private isSensitiveEntity(text: string): boolean {
-        const patterns = [
-            /MITS/i,
-            /Altair/i,
-            /苹果|微软|联想|百度|阿里巴巴|网易|腾讯|谷歌/,
-            /乔布斯|比尔盖茨|柳传志|李彦宏|马云|马化腾|丁磊|罗伯茨/,
-            /qq聊天|basic[:：]/i,
-        ];
-        return patterns.some((pattern) => pattern.test(text));
-    }
-
-    private stripSensitiveTerms(text: string): string {
-        return text
-            .replace(/MITS|Altair|苹果|微软|联想|百度|阿里巴巴|网易|腾讯|谷歌/gi, '科技企业')
-            .replace(/乔布斯|比尔盖茨|柳传志|李彦宏|马云|马化腾|丁磊|罗伯茨/gi, '代表人物')
-            .replace(/qq聊天|basic[:：]?/gi, '核心业务')
-            .replace(/\s+/g, ' ')
-            .trim();
-    }
-
-    private ensureUniqueTitles(slides: SlideContent[]): SlideContent[] {
-        const seen = new Set<string>();
-        const result: SlideContent[] = [];
-
-        slides.forEach((slide, index) => {
-            const base = this.cleanText(slide.title, 60) || `Slide ${index + 1}`;
-            let candidate = base;
-            let probe = candidate.toLowerCase();
-            let dup = 1;
-
-            while (seen.has(probe)) {
-                const tail = this.lastBreadcrumbSegment(slide.breadcrumb) || `L${slide.level || 1}`;
-                candidate = `${base} - ${tail}${dup > 1 ? `-${dup}` : ''}`;
-                probe = candidate.toLowerCase();
-                dup += 1;
-            }
-
-            seen.add(probe);
-            result.push({ ...slide, title: candidate });
-        });
-
-        return result;
-    }
-
-    private lastBreadcrumbSegment(breadcrumb?: string): string {
-        if (!breadcrumb) return '';
-        const parts = breadcrumb.split('/').map((p) => p.trim()).filter(Boolean);
-        if (parts.length === 0) return '';
-        return this.cleanText(parts[parts.length - 1], 24);
     }
 
     private canUseWorkerProxy(): boolean {
-        return false; // Force using the primary LLM API endpoint
+        return Boolean(this.workerUrl && this.workerApiKey);
     }
 
     private async callGeminiViaWorker(prompt: string, temperature: number): Promise<string> {
@@ -883,8 +1491,7 @@ export class PlannerService {
             throw new Error(`Worker proxy failed: status=${response.status}, body=${body}`);
         }
 
-        const text = this.extractGeminiTextFromWorkerResponse(response.data);
-        return this.cleanText(text, 20000);
+        return this.cleanText(this.extractGeminiTextFromWorkerResponse(response.data), 20000);
     }
 
     private extractGeminiTextFromWorkerResponse(payload: any): string {
@@ -902,8 +1509,7 @@ export class PlannerService {
         const fromParts = (root: any): string => {
             const candidates = root?.candidates;
             if (!Array.isArray(candidates) || candidates.length === 0) return '';
-            const first = candidates[0];
-            const parts = first?.content?.parts;
+            const parts = candidates[0]?.content?.parts;
             if (!Array.isArray(parts)) return '';
             return parts
                 .map((part: any) => (typeof part?.text === 'string' ? part.text : ''))
@@ -972,30 +1578,10 @@ export class PlannerService {
         return this.defaultMode;
     }
 
-    private buildModeDirective(mode: PlannerMode): string {
-        if (mode === 'creative') {
-            return 'Use source-grounded creativity: lightly polish phrasing, sharpen takeaways, and enrich visual direction without changing facts.';
-        }
-
-        return 'Use maximum source fidelity: stay close to the source wording and meaning, with no unsupported additions.';
-    }
-
-    private buildModeRules(mode: PlannerMode): string[] {
-        if (mode === 'creative') {
-            return [
-                'Mode: creative. You may lightly polish wording, sharpen takeaways, and add small connective phrasing for better presentation flow.',
-                'Do not introduce unsupported factual claims, dates, statistics, or named entities.',
-                'Bullets: keep 2-5 concise bullets grounded in the source, but you may rewrite them to be more presentation-ready.',
-                'summary should be presentation-oriented, vivid, and still fully grounded in the source.',
-            ];
-        }
-
-        return [
-            'Mode: strict. Stay as close as possible to the source content and wording.',
-            'Do not introduce new facts, examples, interpretations, dates, or named entities.',
-            'Bullets: keep 2-5 concise bullets extracted directly from source meaning.',
-            'summary should be a faithful paraphrase with no extra interpretation.',
-        ];
+    private normalizeForCompare(text: string): string {
+        return this.cleanText(text, 300)
+            .toLowerCase()
+            .replace(/[\s\p{P}\p{S}]+/gu, '');
     }
 
     private cleanText(input: any, maxLength: number): string {
@@ -1004,8 +1590,8 @@ export class PlannerService {
         let text = input
             .replace(/\r?\n+/g, ' ')
             .replace(/\s+/g, ' ')
-            .replace(/[“”]/g, '"')
-            .replace(/[‘’]/g, "'")
+            .replace(/[鈥溾€漖]/g, '"')
+            .replace(/[鈥樷€橾]/g, "'")
             .replace(/[\u0000-\u001f]/g, '')
             .trim();
 

@@ -7,7 +7,7 @@ import { ImageService } from './services/image.service';
 import { PPTService } from './services/ppt.service';
 import { PlannerService } from './services/planner.service';
 import { EvaluatorService } from './services/evaluator.service';
-import { DocumentData, PlannerMode } from './types';
+import { DeckAudience, DeckFocus, DeckFormat, DeckLength, DeckStyle, DocumentData, PlannerMode } from './types';
 
 dotenv.config();
 
@@ -24,6 +24,41 @@ function normalizePlannerMode(input?: string): PlannerMode | undefined {
         return input;
     }
 
+    return undefined;
+}
+
+function normalizeDeckFormat(input?: string): DeckFormat | undefined {
+    if (input === 'presenter' || input === 'detailed') {
+        return input;
+    }
+    return undefined;
+}
+
+function normalizeAudience(input?: string): DeckAudience | undefined {
+    if (input === 'general' || input === 'beginner' || input === 'executive' || input === 'student' || input === 'technical') {
+        return input;
+    }
+    return undefined;
+}
+
+function normalizeFocus(input?: string): DeckFocus | undefined {
+    if (input === 'overview' || input === 'timeline' || input === 'argument' || input === 'process' || input === 'comparison') {
+        return input;
+    }
+    return undefined;
+}
+
+function normalizeStyle(input?: string): DeckStyle | undefined {
+    if (input === 'professional' || input === 'minimal' || input === 'bold' || input === 'educational') {
+        return input;
+    }
+    return undefined;
+}
+
+function normalizeLength(input?: string): DeckLength | undefined {
+    if (input === 'short' || input === 'default' || input === 'long') {
+        return input;
+    }
     return undefined;
 }
 
@@ -61,7 +96,42 @@ async function run(): Promise<void> {
     if (plannerModeArg && !plannerMode) {
         throw new Error(`Invalid --planner-mode value: ${plannerModeArg}. Use strict or creative.`);
     }
-    docData = await plannerService.planDocument(docData, { mode: plannerMode });
+    const deckFormatArg = getArgValue('--deck-format');
+    const audienceArg = getArgValue('--audience');
+    const focusArg = getArgValue('--focus');
+    const styleArg = getArgValue('--style');
+    const lengthArg = getArgValue('--length');
+
+    const deckFormat = normalizeDeckFormat(deckFormatArg);
+    const audience = normalizeAudience(audienceArg);
+    const focus = normalizeFocus(focusArg);
+    const style = normalizeStyle(styleArg);
+    const length = normalizeLength(lengthArg);
+
+    if (deckFormatArg && !deckFormat) {
+        throw new Error(`Invalid --deck-format value: ${deckFormatArg}. Use presenter or detailed.`);
+    }
+    if (audienceArg && !audience) {
+        throw new Error(`Invalid --audience value: ${audienceArg}. Use general, beginner, executive, student, or technical.`);
+    }
+    if (focusArg && !focus) {
+        throw new Error(`Invalid --focus value: ${focusArg}. Use overview, timeline, argument, process, or comparison.`);
+    }
+    if (styleArg && !style) {
+        throw new Error(`Invalid --style value: ${styleArg}. Use professional, minimal, bold, or educational.`);
+    }
+    if (lengthArg && !length) {
+        throw new Error(`Invalid --length value: ${lengthArg}. Use short, default, or long.`);
+    }
+
+    docData = await plannerService.planDocument(docData, {
+        mode: plannerMode,
+        deckFormat,
+        audience,
+        focus,
+        style,
+        length,
+    });
 
     const enableAiImages = process.env.ENABLE_AI_IMAGES !== 'false';
     const imageConcurrency = Number(process.env.IMAGE_CONCURRENCY || 2);
@@ -92,6 +162,11 @@ async function run(): Promise<void> {
     console.log(`Generated PPT: ${outputPath}`);
     console.log(`Title: ${docData.title}`);
     console.log(`Slides: ${docData.slides.length}`);
+    if (docData.brief) {
+        console.log(`Deck Format: ${docData.brief.deckFormat}`);
+        console.log(`Audience: ${docData.brief.audience}`);
+        console.log(`Focus: ${docData.brief.focus}`);
+    }
 }
 
 run().catch((error) => {

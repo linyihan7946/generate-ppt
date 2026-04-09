@@ -1,6 +1,49 @@
 export type SlideLayoutType = 'image_overlay' | 'image_only';
 export type SlideImageSource = 'original' | 'ai_primary' | 'ai_fallback' | 'placeholder';
 export type PlannerMode = 'strict' | 'creative';
+export type DeckFormat = 'presenter' | 'detailed';
+export type DeckAudience = 'general' | 'beginner' | 'executive' | 'student' | 'technical';
+export type DeckFocus = 'overview' | 'timeline' | 'argument' | 'process' | 'comparison';
+export type DeckStyle = 'professional' | 'minimal' | 'bold' | 'educational';
+export type DeckLength = 'short' | 'default' | 'long';
+export type SlideRole =
+    | 'content'
+    | 'agenda'
+    | 'section_divider'
+    | 'key_insight'
+    | 'timeline'
+    | 'comparison'
+    | 'process'
+    | 'data_highlight'
+    | 'summary'
+    | 'next_step';
+
+export interface DeckBrief {
+    deckGoal: string;
+    audience: DeckAudience;
+    focus: DeckFocus;
+    style: DeckStyle;
+    deckFormat: DeckFormat;
+    desiredLength: DeckLength;
+    chapterTitles: string[];
+    coreTakeaways: string[];
+}
+
+export interface UnderstandingTopic {
+    title: string;
+    sourceRefs: number[];
+    importance: number;
+}
+
+export interface UnderstandingResult {
+    thesis: string;
+    chapterTitles: string[];
+    topics: UnderstandingTopic[];
+    timelineSignals: string[];
+    comparisonSignals: string[];
+    processSignals: string[];
+    keyNumbers: string[];
+}
 
 export interface SlideContent {
     title: string;
@@ -14,15 +57,26 @@ export interface SlideContent {
     imagePrompt?: string;
     sourceIndex?: number;
     imageSource?: SlideImageSource;
+    slideRole?: SlideRole;
+    keyMessage?: string;
+    speakerNotes?: string[];
+    sourceRefs?: number[];
 }
 
 export interface DocumentData {
     title: string;
     slides: SlideContent[];
+    brief?: DeckBrief;
+    understanding?: UnderstandingResult;
 }
 
 export interface PlannerOptions {
     mode?: PlannerMode;
+    deckFormat?: DeckFormat;
+    audience?: DeckAudience;
+    focus?: DeckFocus;
+    style?: DeckStyle;
+    length?: DeckLength;
 }
 
 export interface QualityDimensionScore {
