@@ -7,6 +7,7 @@
     "build": "tsc",
     "serve": "node dist/index.js",
     "generate": "ts-node src/cli.ts",
+    "test:image-api": "ts-node test/test_image_api.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

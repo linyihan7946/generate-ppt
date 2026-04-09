@@ -17,6 +17,6 @@
   "exclude": [
     "dist",
     "node_modules",
-    "test_image_api.ts"
+    "test"
   ]
 }
