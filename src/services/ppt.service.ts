@@ -171,7 +171,7 @@ export class PPTService {
             fit: 'shrink',
         });
 
-        if (brief) {
+        if (brief && brief.deckGoal) {
             slide.addShape('roundRect', {
                 x: 8.95,
                 y: 3.1,
@@ -181,15 +181,13 @@ export class PPTService {
                 fill: { color: COLORS.ink, transparency: 12 },
             });
             slide.addText(
-                [`Audience: ${brief.audience}`, `Format: ${brief.deckFormat}`, `Focus: ${brief.focus}`, `Style: ${brief.style}`].join(
-                    '\n',
-                ),
+                this.cleanInlineText(brief.deckGoal),
                 {
                     x: 9.25,
                     y: 3.45,
                     w: 2.95,
                     h: 1.35,
-                    fontSize: 13,
+                    fontSize: 14,
                     color: COLORS.white,
                     fit: 'shrink',
                     valign: 'middle',
@@ -273,6 +271,7 @@ export class PPTService {
             });
         }
 
+        const goalText = brief?.deckGoal ? this.cleanInlineText(brief.deckGoal) : 'An overview of the key topics covered in this presentation.';
         slide.addShape('roundRect', {
             x: 0.82,
             y: 3.02,
@@ -282,21 +281,16 @@ export class PPTService {
             fill: { color: COLORS.panel, transparency: 0 },
         });
         slide.addText(
-            [
-                `Audience: ${brief?.audience || 'general'}`,
-                `Format: ${brief?.deckFormat || 'presenter'}`,
-                `Focus: ${brief?.focus || 'overview'}`,
-                `Length: ${brief?.desiredLength || 'default'}`,
-            ].join('\n'),
+            goalText,
             {
                 x: 1.05,
                 y: 3.46,
                 w: 3.6,
                 h: 2.2,
-                fontSize: 14,
+                fontSize: 16,
                 color: COLORS.ink,
                 fit: 'shrink',
-                valign: 'middle',
+                valign: 'top',
             },
         );
 
