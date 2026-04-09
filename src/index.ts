@@ -175,7 +175,7 @@ app.post('/generate-ppt', upload.single('file'), async (req, res) => {
 
         const enableEvaluation = process.env.ENABLE_EVALUATION !== 'false';
         if (enableEvaluation) {
-            const report = evaluatorService.evaluate(docData, outputPath);
+            const report = await evaluatorService.evaluate(docData, outputPath);
             const reportPaths = evaluatorService.saveReport(report, outputPath);
             res.setHeader('X-PPT-Quality-Score', String(report.overallScore));
             res.setHeader('X-PPT-Quality-Grade', report.grade);

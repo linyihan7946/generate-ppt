@@ -86,6 +86,7 @@ export class PPTService {
         const slide = pres.addSlide();
         const coverImage = slides.find((item) => item.images.length > 0)?.images[0];
         const brief = data.brief;
+        const isCjk = this.isMostlyCjk([data.title, brief?.deckGoal || '', slides.map((item) => item.title).join(' ')].join(' '));
 
         if (coverImage && config.templateStyle) {
             this.addImage(slide, coverImage, 0, 0, SLIDE_WIDTH, SLIDE_HEIGHT);
@@ -101,7 +102,7 @@ export class PPTService {
             this.addDarkBackground(slide);
         }
 
-        this.addSectionTag(slide, 'AI-Synthesized Deck', COLORS.accent, 0.82, 0.74, 2.3, false);
+        this.addSectionTag(slide, isCjk ? '主题演示' : 'Presentation', COLORS.accent, 0.82, 0.74, 2.3, false);
         slide.addText(data.title, {
             x: 0.8,
             y: 1.65,
@@ -127,9 +128,7 @@ export class PPTService {
             });
         }
 
-        const takeaways = (brief?.coreTakeaways || slides.slice(0, 3).map((item) => item.keyMessage || item.title))
-            .filter(Boolean)
-            .slice(0, 3);
+        const takeaways = this.buildCoverTakeaways(brief, slides).slice(0, 3);
         takeaways.forEach((item, index) => {
             slide.addShape('roundRect', {
                 x: 0.85,
@@ -150,51 +149,46 @@ export class PPTService {
             });
         });
 
-        slide.addShape('roundRect', {
-            x: 9.55,
-            y: 1.2,
-            w: 2.95,
-            h: 1.4,
-            line: { color: COLORS.white, transparency: 100 },
-            fill: { color: COLORS.white, transparency: 88 },
-        });
-        slide.addText(`Content slides\n${slides.length}`, {
-            x: 9.95,
-            y: 1.56,
-            w: 2.15,
-            h: 0.65,
-            fontSize: 16,
-            color: COLORS.paper,
-            bold: true,
-            align: 'center',
-            valign: 'middle',
-            fit: 'shrink',
-        });
-
-        if (brief) {
+        const coverTopics = this.buildCoverTopics(brief, slides).slice(0, 4);
+        if (coverTopics.length > 0) {
             slide.addShape('roundRect', {
                 x: 8.95,
-                y: 3.1,
+                y: 1.18,
                 w: 3.6,
-                h: 2.1,
+                h: 4.12,
                 line: { color: COLORS.white, transparency: 100 },
-                fill: { color: COLORS.ink, transparency: 12 },
+                fill: { color: COLORS.white, transparency: 82 },
             });
-            slide.addText(
-                [`Audience: ${brief.audience}`, `Format: ${brief.deckFormat}`, `Focus: ${brief.focus}`, `Style: ${brief.style}`].join(
-                    '\n',
-                ),
-                {
-                    x: 9.25,
-                    y: 3.45,
-                    w: 2.95,
-                    h: 1.35,
-                    fontSize: 13,
-                    color: COLORS.white,
+            slide.addText(isCjk ? '内容脉络' : 'Outline', {
+                x: 9.22,
+                y: 1.46,
+                w: 2.3,
+                h: 0.24,
+                fontSize: 15,
+                color: COLORS.ink,
+                bold: true,
+                fit: 'shrink',
+            });
+
+            coverTopics.forEach((item, index) => {
+                slide.addShape('roundRect', {
+                    x: 9.18,
+                    y: 1.92 + index * 0.72,
+                    w: 3.02,
+                    h: 0.5,
+                    line: { color: COLORS.line, transparency: 100 },
+                    fill: { color: COLORS.panelSoft, transparency: 10 },
+                });
+                slide.addText(item, {
+                    x: 9.38,
+                    y: 2.08 + index * 0.72,
+                    w: 2.62,
+                    h: 0.16,
+                    fontSize: 12,
+                    color: COLORS.ink,
                     fit: 'shrink',
-                    valign: 'middle',
-                },
-            );
+                });
+            });
         }
     }
 
@@ -248,7 +242,8 @@ export class PPTService {
 
     private addAgendaSlide(slide: pptxgen.Slide, slideData: SlideContent, brief?: DeckBrief): void {
         this.addLightBackground(slide);
-        this.addSectionTag(slide, 'Deck Map', COLORS.accent, 0.85, 0.62, 1.45, false);
+        const isCjk = this.isMostlyCjk([slideData.title, slideData.summary || '', ...(brief?.coreTakeaways || [])].join(' '));
+        this.addSectionTag(slide, isCjk ? '内容导航' : 'Agenda', COLORS.accent, 0.85, 0.62, 1.45, false);
         slide.addText(slideData.title, {
             x: 0.85,
             y: 1.15,
@@ -281,24 +276,36 @@ export class PPTService {
             line: { color: COLORS.line, transparency: 20 },
             fill: { color: COLORS.panel, transparency: 0 },
         });
-        slide.addText(
-            [
-                `Audience: ${brief?.audience || 'general'}`,
-                `Format: ${brief?.deckFormat || 'presenter'}`,
-                `Focus: ${brief?.focus || 'overview'}`,
-                `Length: ${brief?.desiredLength || 'default'}`,
-            ].join('\n'),
-            {
-                x: 1.05,
-                y: 3.46,
-                w: 3.6,
-                h: 2.2,
-                fontSize: 14,
+        slide.addText(isCjk ? '本次聚焦' : 'Focus', {
+            x: 1.05,
+            y: 3.28,
+            w: 1.7,
+            h: 0.22,
+            fontSize: 15,
+            color: COLORS.ink,
+            bold: true,
+            fit: 'shrink',
+        });
+        const focusItems = this.buildAgendaFocusItems(brief, slideData).slice(0, 4);
+        focusItems.forEach((item, index) => {
+            slide.addShape('roundRect', {
+                x: 1.0,
+                y: 3.68 + index * 0.65,
+                w: 3.72,
+                h: 0.46,
+                line: { color: COLORS.line, transparency: 100 },
+                fill: { color: index % 2 === 0 ? COLORS.panelSoft : COLORS.accentSoft, transparency: 18 },
+            });
+            slide.addText(item, {
+                x: 1.18,
+                y: 3.82 + index * 0.65,
+                w: 3.35,
+                h: 0.15,
+                fontSize: 12,
                 color: COLORS.ink,
                 fit: 'shrink',
-                valign: 'middle',
-            },
-        );
+            });
+        });
 
         const agendaItems = this.deduplicateBullets(
             (brief?.chapterTitles || []).length > 0 ? brief!.chapterTitles : slideData.bullets,
@@ -409,7 +416,7 @@ export class PPTService {
 
     private addTimelineSlide(slide: pptxgen.Slide, slideData: SlideContent): void {
         this.addLightBackground(slide);
-        this.addStandardHeader(slide, slideData, 'Timeline', COLORS.amber);
+        this.addStandardHeader(slide, slideData, this.getRoleTagLabel('timeline', slideData), COLORS.amber);
 
         const events = this.buildTimelineEvents(slideData).slice(0, 4);
         slide.addShape('rect', {
@@ -465,7 +472,7 @@ export class PPTService {
 
     private addComparisonSlide(slide: pptxgen.Slide, slideData: SlideContent): void {
         this.addLightBackground(slide);
-        this.addStandardHeader(slide, slideData, 'Comparison', COLORS.accentDark);
+        this.addStandardHeader(slide, slideData, this.getRoleTagLabel('comparison', slideData), COLORS.accentDark);
         const columns = this.buildComparisonColumns(slideData);
         this.addComparisonColumn(slide, 0.92, columns.leftTitle, columns.leftItems, COLORS.accentSoft);
         this.addComparisonColumn(slide, 6.78, columns.rightTitle, columns.rightItems, COLORS.violetSoft);
@@ -473,9 +480,10 @@ export class PPTService {
 
     private addProcessSlide(slide: pptxgen.Slide, slideData: SlideContent): void {
         this.addLightBackground(slide);
-        this.addStandardHeader(slide, slideData, 'Process', COLORS.success);
+        this.addStandardHeader(slide, slideData, this.getRoleTagLabel('process', slideData), COLORS.success);
 
         const steps = this.deduplicateBullets(slideData.bullets).slice(0, 4);
+        const isCjk = this.isMostlyCjk(this.collectSlideLanguageSeed(slideData));
         const stepWidth = steps.length <= 3 ? 3.35 : 2.45;
         const gap = steps.length <= 3 ? 0.42 : 0.24;
         const totalWidth = steps.length * stepWidth + Math.max(0, steps.length - 1) * gap;
@@ -499,7 +507,7 @@ export class PPTService {
                 line: { color: COLORS.success, transparency: 100 },
                 fill: { color: COLORS.successSoft, transparency: 0 },
             });
-            slide.addText(`Step ${index + 1}`, {
+            slide.addText(isCjk ? `步骤 ${index + 1}` : `Step ${index + 1}`, {
                 x: x + 0.28,
                 y: 2.95,
                 w: 0.55,
@@ -552,7 +560,7 @@ export class PPTService {
             this.addDarkBackground(slide);
         }
 
-        this.addSectionTag(slide, 'Data Highlight', COLORS.accent, 0.88, 0.7, 1.85, false);
+        this.addSectionTag(slide, this.getRoleTagLabel('data_highlight', slideData), COLORS.accent, 0.88, 0.7, 1.85, false);
         slide.addText(slideData.title, {
             x: 0.9,
             y: 1.4,
@@ -599,11 +607,12 @@ export class PPTService {
 
     private addSummarySlide(slide: pptxgen.Slide, slideData: SlideContent, brief?: DeckBrief): void {
         this.addLightBackground(slide);
-        this.addStandardHeader(slide, slideData, 'Summary', COLORS.accent);
+        this.addStandardHeader(slide, slideData, this.getRoleTagLabel('summary', slideData), COLORS.accent);
 
         const cards = this.deduplicateBullets(
             slideData.bullets.length > 0 ? slideData.bullets : brief?.coreTakeaways || [],
         ).slice(0, 4);
+        const isCjk = this.isMostlyCjk(this.collectSlideLanguageSeed(slideData));
 
         cards.forEach((item, index) => {
             const col = index % 2;
@@ -618,7 +627,7 @@ export class PPTService {
                 line: { color: COLORS.line, transparency: 28 },
                 fill: { color: index % 2 === 0 ? COLORS.panel : COLORS.panelSoft, transparency: 10 },
             });
-            slide.addText(`Takeaway ${index + 1}`, {
+            slide.addText(isCjk ? `要点 ${index + 1}` : `Takeaway ${index + 1}`, {
                 x: x + 0.24,
                 y: y + 0.18,
                 w: 1.1,
@@ -642,7 +651,7 @@ export class PPTService {
 
     private addNextStepSlide(slide: pptxgen.Slide, slideData: SlideContent): void {
         this.addLightBackground(slide);
-        this.addStandardHeader(slide, slideData, 'Action Plan', COLORS.success);
+        this.addStandardHeader(slide, slideData, this.getRoleTagLabel('next_step', slideData), COLORS.success);
 
         const actions = this.deduplicateBullets(slideData.bullets).slice(0, 5);
         actions.forEach((item, index) => {
@@ -712,7 +721,7 @@ export class PPTService {
             }
         }
 
-        this.addSectionTag(slide, 'Key Insight', COLORS.accent, 0.88, 0.74, 1.65, false);
+        this.addSectionTag(slide, this.getRoleTagLabel('key_insight', slideData), COLORS.accent, 0.88, 0.74, 1.65, false);
         slide.addText(slideData.title, {
             x: 0.9,
             y: 1.32,
@@ -777,7 +786,7 @@ export class PPTService {
             });
         }
 
-        this.addSectionTag(slide, 'Content', COLORS.accent, 0.85, 0.62, 1.35, false);
+        this.addSectionTag(slide, this.getRoleTagLabel('content', slideData), COLORS.accent, 0.85, 0.62, 1.35, false);
         if (slideData.breadcrumb) {
             slide.addText(slideData.breadcrumb, {
                 x: 0.88,
@@ -877,7 +886,7 @@ export class PPTService {
         });
 
         if (config.showSourceRefs && slideData.sourceRefs && slideData.sourceRefs.length > 0) {
-            slide.addText(`Sources: ${slideData.sourceRefs.join(', ')}`, {
+            slide.addText(`${this.isMostlyCjk(this.collectSlideLanguageSeed(slideData)) ? '来源' : 'Sources'}: ${slideData.sourceRefs.join(', ')}`, {
                 x: 0.88,
                 y: 6.94,
                 w: 2.8,
@@ -1108,9 +1117,10 @@ export class PPTService {
         const match = slideData.title.match(/(.+?)\s+(?:vs|compare|contrast|and)\s+(.+)/i);
         const bullets = this.deduplicateBullets(slideData.bullets);
         const midpoint = Math.max(1, Math.ceil(bullets.length / 2));
+        const isCjk = this.isMostlyCjk(this.collectSlideLanguageSeed(slideData));
         return {
-            leftTitle: match?.[1]?.trim() || 'Perspective A',
-            rightTitle: match?.[2]?.trim() || 'Perspective B',
+            leftTitle: match?.[1]?.trim() || (isCjk ? '方向 A' : 'Perspective A'),
+            rightTitle: match?.[2]?.trim() || (isCjk ? '方向 B' : 'Perspective B'),
             leftItems: bullets.slice(0, midpoint),
             rightItems: bullets.slice(midpoint),
         };
@@ -1118,6 +1128,7 @@ export class PPTService {
 
     private buildTimelineEvents(slideData: SlideContent): TimelineEvent[] {
         const events: TimelineEvent[] = [];
+        const isCjk = this.isMostlyCjk(this.collectSlideLanguageSeed(slideData));
         this.deduplicateBullets(slideData.bullets).forEach((item, index) => {
             const trimmed = this.cleanInlineText(item);
             const match = trimmed.match(/^((?:19|20)\d{2}|Q[1-4]\s+\d{4}|Phase\s+\d+|Step\s+\d+)\s*[:\-\uFF1A]?\s*(.*)$/i);
@@ -1130,11 +1141,149 @@ export class PPTService {
                 events.push({ label: parts[0], detail: parts.slice(1).join(':').trim() });
                 return;
             }
-            events.push({ label: `Point ${index + 1}`, detail: trimmed });
+            events.push({ label: isCjk ? `节点 ${index + 1}` : `Point ${index + 1}`, detail: trimmed });
         });
         return events.length > 0
             ? events
-            : [{ label: 'Stage 1', detail: this.cleanInlineText(slideData.keyMessage || slideData.title) }];
+            : [{ label: isCjk ? '阶段 1' : 'Stage 1', detail: this.cleanInlineText(slideData.keyMessage || slideData.title) }];
+    }
+
+    private buildCoverTakeaways(brief: DeckBrief | undefined, slides: SlideContent[]): string[] {
+        return this.pickAudienceFacingItems(
+            (brief?.coreTakeaways || slides.map((item) => item.keyMessage || item.title)).filter(Boolean),
+            3,
+        );
+    }
+
+    private buildCoverTopics(brief: DeckBrief | undefined, slides: SlideContent[]): string[] {
+        return this.pickAudienceFacingItems(
+            (brief?.chapterTitles || slides.map((item) => item.title)).filter(Boolean),
+            4,
+        );
+    }
+
+    private buildAgendaFocusItems(brief: DeckBrief | undefined, slideData: SlideContent): string[] {
+        return this.pickAudienceFacingItems(
+            [
+                ...(brief?.coreTakeaways || []),
+                slideData.summary || '',
+                slideData.keyMessage || '',
+                ...slideData.bullets,
+            ],
+            4,
+        );
+    }
+
+    private pickAudienceFacingItems(items: string[], maxItems: number): string[] {
+        const unique = new Set<string>();
+        const results: string[] = [];
+
+        for (const raw of items) {
+            const text = this.cleanInlineText(raw || '');
+            if (!text || this.isPresenterArtifactText(text)) {
+                continue;
+            }
+
+            const key = this.normalizeForCompare(text);
+            if (!key || unique.has(key)) {
+                continue;
+            }
+
+            unique.add(key);
+            results.push(text);
+            if (results.length >= maxItems) {
+                break;
+            }
+        }
+
+        return results;
+    }
+
+    private getRoleTagLabel(role: SlideRole, slideData: SlideContent): string {
+        const isCjk = this.isMostlyCjk(this.collectSlideLanguageSeed(slideData));
+        if (isCjk) {
+            switch (role) {
+                case 'timeline':
+                    return '时间线';
+                case 'comparison':
+                    return '对比分析';
+                case 'process':
+                    return '流程拆解';
+                case 'data_highlight':
+                    return '重点数据';
+                case 'summary':
+                    return '核心总结';
+                case 'next_step':
+                    return '下一步';
+                case 'key_insight':
+                    return '核心观点';
+                case 'content':
+                default:
+                    return '内容页';
+            }
+        }
+
+        switch (role) {
+            case 'timeline':
+                return 'Timeline';
+            case 'comparison':
+                return 'Comparison';
+            case 'process':
+                return 'Process';
+            case 'data_highlight':
+                return 'Data Highlight';
+            case 'summary':
+                return 'Summary';
+            case 'next_step':
+                return 'Action Plan';
+            case 'key_insight':
+                return 'Key Insight';
+            case 'content':
+            default:
+                return 'Content';
+        }
+    }
+
+    private collectSlideLanguageSeed(slideData: SlideContent): string {
+        return [
+            slideData.title,
+            slideData.summary || '',
+            slideData.keyMessage || '',
+            slideData.breadcrumb || '',
+            slideData.bullets.join(' '),
+        ].join(' ');
+    }
+
+    private isPresenterArtifactText(text: string): boolean {
+        const normalized = this.cleanInlineText(text).toLowerCase();
+        if (!normalized) {
+            return false;
+        }
+
+        const patterns = [
+            /\bhelp .* understand\b/,
+            /\bpresentation framing\b/,
+            /\boverview-driven\b/,
+            /\btimeline-focused\b/,
+            /\bcomparison-driven\b/,
+            /\bprocess-oriented\b/,
+            /\bargument-led\b/,
+            /\baudience\s*:/,
+            /\bformat\s*:/,
+            /\bfocus\s*:/,
+            /\bstyle\s*:/,
+            /\blength\s*:/,
+            /\bcontent slides\b/,
+            /\bai-synthesized deck\b/,
+        ];
+
+        return patterns.some((pattern) => pattern.test(normalized));
+    }
+
+    private isMostlyCjk(text: string): boolean {
+        const cleaned = this.cleanInlineText(text);
+        const matches = cleaned.match(/[\u4e00-\u9fff]/g) || [];
+        return matches.length >= Math.max(2, Math.floor(cleaned.length / 5));
     }
 
     private extractKeyFigure(slideData: SlideContent): string {

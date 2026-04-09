@@ -115,6 +115,10 @@ export interface QualityMetrics {
     overflowRiskSlideCount: number;
     promptAlignmentAvg: number;
     fallbackImageCount: number;
+    renderedSlideCount: number;
+    renderedMetaArtifactSlideCount: number;
+    renderedInstructionalTextSlideCount: number;
+    renderedMixedLanguageSlideCount: number;
 }
 
 export interface QualityReport {

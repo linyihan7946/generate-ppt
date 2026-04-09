@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import JSZip from 'jszip';
 import {
     DocumentData,
     QualityDimensionScore,
@@ -7,6 +8,13 @@ import {
     QualityReport,
     SlideContent,
 } from '../types';
+
+interface RenderedDeckInspection {
+    renderedSlideCount: number;
+    renderedMetaArtifactSlideCount: number;
+    renderedInstructionalTextSlideCount: number;
+    renderedMixedLanguageSlideCount: number;
+}
 
 export class EvaluatorService {
     private readonly logicWeight = 0.2;
@@ -16,9 +24,10 @@ export class EvaluatorService {
     private readonly audienceFitWeight = 0.16;
     private readonly consistencyWeight = 0.14;
 
-    evaluate(docData: DocumentData, outputPath?: string): QualityReport {
+    async evaluate(docData: DocumentData, outputPath?: string): Promise<QualityReport> {
         const slides = docData.slides;
-        const metrics = this.computeMetrics(slides);
+        const renderedDeck = await this.inspectRenderedDeck(outputPath, docData.title);
+        const metrics = this.computeMetrics(slides, renderedDeck);
 
         const logic = this.scoreLogic(docData, slides, metrics);
         const layout = this.scoreLayout(slides, metrics);
@@ -88,7 +97,138 @@ export class EvaluatorService {
         return { jsonPath, markdownPath };
     }
 
-    private computeMetrics(slides: SlideContent[]): QualityMetrics {
+    private async inspectRenderedDeck(outputPath?: string, deckTitle = ''): Promise<RenderedDeckInspection> {
+        if (!outputPath || !fs.existsSync(outputPath)) {
+            return this.emptyRenderedDeckInspection();
+        }
+
+        try {
+            const zip = await JSZip.loadAsync(fs.readFileSync(outputPath));
+            const slideEntries = Object.keys(zip.files)
+                .filter((name) => /^ppt\/slides\/slide\d+\.xml$/i.test(name))
+                .sort((left, right) => this.extractSlideNumber(left) - this.extractSlideNumber(right));
+
+            if (slideEntries.length === 0) {
+                return this.emptyRenderedDeckInspection();
+            }
+
+            const slideTexts = await Promise.all(
+                slideEntries.map(async (name) => this.extractRenderedSlideText(await zip.files[name].async('string'))),
+            );
+            const dominantLanguage = this.detectDominantLanguage([deckTitle, ...slideTexts].join(' '));
+
+            return {
+                renderedSlideCount: slideTexts.length,
+                renderedMetaArtifactSlideCount: slideTexts.filter((text) => this.hasRenderedMetaArtifact(text)).length,
+                renderedInstructionalTextSlideCount: slideTexts.filter((text) => this.hasRenderedInstructionalArtifact(text))
+                    .length,
+                renderedMixedLanguageSlideCount: slideTexts.filter((text) =>
+                    this.hasRenderedMixedLanguageNarration(text, dominantLanguage),
+                ).length,
+            };
+        } catch (error: any) {
+            console.warn('Rendered deck inspection failed:', error?.message || error);
+            return this.emptyRenderedDeckInspection();
+        }
+    }
+
+    private emptyRenderedDeckInspection(): RenderedDeckInspection {
+        return {
+            renderedSlideCount: 0,
+            renderedMetaArtifactSlideCount: 0,
+            renderedInstructionalTextSlideCount: 0,
+            renderedMixedLanguageSlideCount: 0,
+        };
+    }
+
+    private extractSlideNumber(name: string): number {
+        const match = name.match(/slide(\d+)\.xml$/i);
+        return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+    }
+
+    private extractRenderedSlideText(xml: string): string {
+        const textRuns = Array.from(xml.matchAll(/<a:t[^>]*>([\s\S]*?)<\/a:t>/g), (match) => this.decodeXmlEntities(match[1]));
+        return this.cleanText(textRuns.join(' '));
+    }
+
+    private decodeXmlEntities(text: string): string {
+        return text
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&amp;/g, '&')
+            .replace(/&quot;/g, '"')
+            .replace(/&apos;/g, "'");
+    }
+
+    private detectDominantLanguage(text: string): 'cjk' | 'latin' {
+        const cleaned = this.cleanText(text);
+        const cjkCount = (cleaned.match(/[\u4e00-\u9fff]/g) || []).length;
+        const latinCount = (cleaned.match(/[A-Za-z]/g) || []).length;
+        return cjkCount >= Math.max(12, Math.round(latinCount * 0.6)) ? 'cjk' : 'latin';
+    }
+
+    private hasRenderedMetaArtifact(text: string): boolean {
+        const normalized = this.cleanText(text).toLowerCase();
+        if (!normalized) return false;
+
+        const patterns = [
+            /\bai-synthesized deck\b/,
+            /\bcontent slides\b/,
+            /\baudience\s*:/,
+            /\bformat\s*:/,
+            /\bfocus\s*:/,
+            /\bstyle\s*:/,
+            /\blength\s*:/,
+        ];
+
+        return patterns.some((pattern) => pattern.test(normalized));
+    }
+
+    private hasRenderedInstructionalArtifact(text: string): boolean {
+        const normalized = this.cleanText(text).toLowerCase();
+        if (!normalized) return false;
+
+        const patterns = [
+            /\bhelp .* understand\b/,
+            /\bpresentation framing\b/,
+            /\boverview-driven\b/,
+            /\btimeline-focused\b/,
+            /\bcomparison-driven\b/,
+            /\bprocess-oriented\b/,
+            /\bargument-led\b/,
+            /\bpractical takeaway\b/,
+            /\bfor the audience\b/,
+        ];
+
+        return patterns.some((pattern) => pattern.test(normalized));
+    }
+
+    private hasRenderedMixedLanguageNarration(text: string, dominantLanguage: 'cjk' | 'latin'): boolean {
+        const cleaned = this.cleanText(text);
+        if (!cleaned) return false;
+
+        if (dominantLanguage === 'cjk') {
+            if (!/[\u4e00-\u9fff]/.test(cleaned)) {
+                return false;
+            }
+
+            const englishPhrases = cleaned.match(/[A-Za-z][A-Za-z-]*(?:\s+[A-Za-z][A-Za-z-]*)+/g) || [];
+            return englishPhrases.some((phrase) => {
+                const normalized = phrase.replace(/\s+/g, ' ').trim();
+                const wordCount = normalized.split(/\s+/).length;
+                const letterCount = (normalized.match(/[A-Za-z]/g) || []).length;
+                return wordCount >= 3 || letterCount >= 14;
+            });
+        }
+
+        if (!/[A-Za-z]/.test(cleaned)) {
+            return false;
+        }
+
+        return (cleaned.match(/[\u4e00-\u9fff]/g) || []).length >= 6;
+    }
+
+    private computeMetrics(slides: SlideContent[], renderedDeck: RenderedDeckInspection): QualityMetrics {
         const slideCount = slides.length;
         const slideWithImageCount = slides.filter((s) => s.images.length > 0).length;
         const slidesWithSummaryCount = slides.filter((s) => this.cleanText(s.summary || '').length > 0).length;
@@ -137,6 +277,10 @@ export class EvaluatorService {
             promptAlignmentAvg: this.round(this.averagePromptAlignment(slides), 3),
             fallbackImageCount: slides.filter((s) => s.imageSource === 'ai_fallback' || s.imageSource === 'placeholder')
                 .length,
+            renderedSlideCount: renderedDeck.renderedSlideCount,
+            renderedMetaArtifactSlideCount: renderedDeck.renderedMetaArtifactSlideCount,
+            renderedInstructionalTextSlideCount: renderedDeck.renderedInstructionalTextSlideCount,
+            renderedMixedLanguageSlideCount: renderedDeck.renderedMixedLanguageSlideCount,
         };
     }
 
@@ -234,6 +378,13 @@ export class EvaluatorService {
         } else {
             score += 2;
             evidence.push('No high-risk text overflow slide detected.');
+        }
+        if (metrics.renderedMetaArtifactSlideCount > 0) {
+            score -= Math.min(24, metrics.renderedMetaArtifactSlideCount * 8);
+            issues.push(`${metrics.renderedMetaArtifactSlideCount} rendered slides expose planner/debug metadata.`);
+            recommendations.push('Remove planner parameters, generator labels, and deck stats from visible slides.');
+        } else if (metrics.renderedSlideCount > 0) {
+            evidence.push('No planner/debug metadata found in rendered slide text.');
         }
         if (metrics.dominantLayoutRatio > 0.9 && metrics.slideCount >= 6) {
             score -= this.round((metrics.dominantLayoutRatio - 0.9) * 60, 1);
@@ -382,6 +533,7 @@ export class EvaluatorService {
         const actionCueCoverage = metrics.slideCount === 0 ? 0 : metrics.actionCueSlideCount / metrics.slideCount;
         evidence.push(`Action-cue coverage: ${(actionCueCoverage * 100).toFixed(1)}%.`);
         evidence.push(`Average bullet length: ${metrics.avgBulletLength}.`);
+        evidence.push(`Mixed-language rendered slides: ${metrics.renderedMixedLanguageSlideCount}.`);
 
         if (actionCueCoverage < 0.15 && metrics.slideCount >= 6) {
             score -= Math.min(18, this.round((0.15 - actionCueCoverage) * 80, 1));
@@ -407,6 +559,18 @@ export class EvaluatorService {
             score -= 8;
             issues.push('Low summary coverage hurts first-glance readability.');
             recommendations.push('Improve summary coverage for audience orientation.');
+        }
+        if (metrics.renderedInstructionalTextSlideCount > 0) {
+            score -= Math.min(18, metrics.renderedInstructionalTextSlideCount * 6);
+            issues.push(`${metrics.renderedInstructionalTextSlideCount} rendered slides contain instructional/helper copy.`);
+            recommendations.push('Replace helper phrasing with audience-facing content.');
+        }
+        if (metrics.renderedMixedLanguageSlideCount > 0) {
+            score -= Math.min(18, metrics.renderedMixedLanguageSlideCount * 5);
+            issues.push(`${metrics.renderedMixedLanguageSlideCount} rendered slides mix languages in visible narration.`);
+            recommendations.push('Keep visible narration in one dominant language unless bilingual output is intentional.');
+        } else if (metrics.renderedSlideCount > 0) {
+            evidence.push('Rendered slide language stays broadly consistent.');
         }
         const lastSlide = slides[slides.length - 1];
         if (lastSlide && !this.hasActionCue(this.collectSlideText(lastSlide))) {
@@ -473,11 +637,23 @@ export class EvaluatorService {
             issues.push('Fallback images reduce visual consistency.');
             recommendations.push('Reduce fallback image ratio.');
         }
+        if (metrics.renderedMetaArtifactSlideCount > 0) {
+            score -= Math.min(10, metrics.renderedMetaArtifactSlideCount * 3);
+            issues.push('Visible planner/debug metadata hurts presentation consistency.');
+            recommendations.push('Keep only audience-facing labels on slides.');
+        }
+        if (metrics.renderedMixedLanguageSlideCount > 0) {
+            score -= Math.min(10, metrics.renderedMixedLanguageSlideCount * 3);
+            issues.push('Mixed-language narration hurts style consistency.');
+            recommendations.push('Standardize visible slide language.');
+        }
         if (
             metrics.duplicateTitleCount === 0 &&
             metrics.genericTitleCount === 0 &&
             metrics.weakTransitionCount === 0 &&
-            metrics.redundantContentItemCount === 0
+            metrics.redundantContentItemCount === 0 &&
+            metrics.renderedMetaArtifactSlideCount === 0 &&
+            metrics.renderedMixedLanguageSlideCount === 0
         ) {
             score += 4;
             evidence.push('Content style consistency is high.');
@@ -772,6 +948,15 @@ export class EvaluatorService {
         }
         if (metrics.overflowRiskSlideCount > 0) {
             findings.push(`${metrics.overflowRiskSlideCount} slides have potential text overflow risk.`);
+        }
+        if (metrics.renderedMetaArtifactSlideCount > 0) {
+            findings.push(`${metrics.renderedMetaArtifactSlideCount} rendered slides leaked planner/debug metadata.`);
+        }
+        if (metrics.renderedInstructionalTextSlideCount > 0) {
+            findings.push(`${metrics.renderedInstructionalTextSlideCount} rendered slides contain helper-style instructional copy.`);
+        }
+        if (metrics.renderedMixedLanguageSlideCount > 0) {
+            findings.push(`${metrics.renderedMixedLanguageSlideCount} rendered slides contain mixed-language narration.`);
         }
         return findings;
     }

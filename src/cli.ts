@@ -152,7 +152,7 @@ async function run(): Promise<void> {
 
     const enableEvaluation = process.env.ENABLE_EVALUATION !== 'false';
     if (enableEvaluation) {
-        const report = evaluatorService.evaluate(docData, outputPath);
+        const report = await evaluatorService.evaluate(docData, outputPath);
         const reportPaths = evaluatorService.saveReport(report, outputPath);
         console.log(`Quality Score: ${report.overallScore} (${report.grade})`);
         console.log(`Quality JSON: ${reportPaths.jsonPath}`);

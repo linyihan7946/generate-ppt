@@ -95,7 +95,7 @@ export class PlannerService {
         plannedDoc = await this.expandSparseSlidesIfNeeded(plannedDoc, mode, preferences);
         plannedDoc.slides = this.strengthenNarrativeContinuity(plannedDoc.slides, plannedDoc.title || docData.title);
         plannedDoc.slides = this.ensureUniqueTitles(plannedDoc.slides);
-        return plannedDoc;
+        return this.sanitizePresentationLanguage(plannedDoc, preferences);
     }
 
     private async generatePlanWithGemini(
@@ -410,15 +410,202 @@ export class PlannerService {
             deckFormat: preferences.deckFormat,
             desiredLength: preferences.length,
             chapterTitles,
-            coreTakeaways: coreTakeaways.length > 0 ? coreTakeaways : [this.cleanText(title, 80) || 'Core takeaway'],
+            coreTakeaways: coreTakeaways.length > 0 ? coreTakeaways : [this.cleanText(title, 80) || (this.isMostlyCjk(title) ? '核心要点' : 'Core takeaway')],
         };
     }
 
     private buildDeckGoal(title: string, preferences: PlanningPreferences): string {
         const deckTitle = this.cleanText(title, 80) || 'the source material';
-        const audienceText = this.mapAudienceLabel(preferences.audience);
-        const focusText = this.mapFocusLabel(preferences.focus);
-        return `Help ${audienceText} understand ${deckTitle} with ${focusText} presentation framing.`;
+        if (this.isMostlyCjk(deckTitle)) {
+            switch (preferences.focus) {
+                case 'timeline':
+                    return `聚焦${deckTitle}的关键阶段、转折节点与演进主线。`;
+                case 'comparison':
+                    return `聚焦${deckTitle}中的关键角色差异、竞争关系与代表特征。`;
+                case 'process':
+                    return `聚焦${deckTitle}的核心机制、推进路径与阶段关系。`;
+                case 'argument':
+                    return `聚焦${deckTitle}的核心判断、主要依据与关键结论。`;
+                default:
+                    return `聚焦${deckTitle}的关键阶段、代表力量与整体脉络。`;
+            }
+        }
+
+        switch (preferences.focus) {
+            case 'timeline':
+                return `A timeline view of ${deckTitle}, highlighting milestones and turning points.`;
+            case 'comparison':
+                return `A comparison view of ${deckTitle}, highlighting key players and differences.`;
+            case 'process':
+                return `A process view of ${deckTitle}, highlighting the main steps and mechanisms.`;
+            case 'argument':
+                return `A concise argument-led view of ${deckTitle}, highlighting the main claim and support.`;
+            default:
+                return `A concise overview of ${deckTitle}, highlighting the main stages and signals.`;
+        }
+    }
+
+    private sanitizePresentationLanguage(docData: DocumentData, preferences: PlanningPreferences): DocumentData {
+        const deckTitle = this.cleanText(docData.title, 80) || 'Presentation';
+        const isCjk = this.isMostlyCjk(deckTitle);
+        const brief = docData.brief
+            ? {
+                  ...docData.brief,
+                  deckGoal: this.sanitizeDeckGoal(docData.brief.deckGoal || '', deckTitle, preferences, isCjk),
+              }
+            : undefined;
+
+        const maxBullets = preferences.deckFormat === 'presenter' ? 4 : 6;
+        const slides = docData.slides.map((slide) => {
+            const role = slide.slideRole || 'content';
+            const bullets = this.normalizeBullets(slide.bullets, maxBullets);
+            const title = this.sanitizeRoleTitle(this.cleanText(slide.title, 80) || 'Slide', role, isCjk);
+            const keyMessage =
+                this.sanitizeVisibleNarration(
+                    slide.keyMessage || '',
+                    title,
+                    bullets,
+                    preferences,
+                    isCjk,
+                    true,
+                ) || this.cleanText(bullets[0] || slide.summary || title, 140);
+            const summary = this.sanitizeVisibleNarration(
+                slide.summary || '',
+                title,
+                bullets,
+                preferences,
+                isCjk,
+                false,
+            );
+
+            return {
+                ...slide,
+                title,
+                keyMessage,
+                summary,
+                breadcrumb: this.cleanText(this.buildDefaultBreadcrumb(deckTitle, title, role), 80),
+            };
+        });
+
+        return {
+            ...docData,
+            brief,
+            slides,
+        };
+    }
+
+    private sanitizeDeckGoal(goal: string, deckTitle: string, preferences: PlanningPreferences, isCjk: boolean): string {
+        const cleaned = this.cleanText(goal, 180);
+        if (!cleaned) {
+            return this.buildDeckGoal(deckTitle, preferences);
+        }
+
+        if (this.isPlannerArtifactText(cleaned) || (isCjk && this.containsLongEnglishPhrase(cleaned))) {
+            return this.buildDeckGoal(deckTitle, preferences);
+        }
+
+        return cleaned;
+    }
+
+    private sanitizeVisibleNarration(
+        text: string,
+        title: string,
+        bullets: string[],
+        preferences: PlanningPreferences,
+        isCjk: boolean,
+        preferMessage: boolean,
+    ): string {
+        const cleaned = this.cleanText(text, 140);
+        const fallbackMessage = this.cleanText(bullets[0] || title, 140) || title;
+        const fallbackSummary = this.selectSummary(fallbackMessage, bullets, title);
+
+        if (!cleaned) {
+            return preferMessage ? fallbackMessage : fallbackSummary;
+        }
+
+        const shouldReplace =
+            this.isPlannerArtifactText(cleaned) || (isCjk && this.containsLongEnglishPhrase(cleaned) && !this.isMostlyCjk(cleaned));
+
+        if (!shouldReplace) {
+            return cleaned;
+        }
+
+        if (preferMessage) {
+            return fallbackMessage;
+        }
+
+        if (preferences.deckFormat === 'presenter') {
+            return fallbackSummary;
+        }
+
+        return this.selectSummary(fallbackMessage, bullets, title);
+    }
+
+    private sanitizeRoleTitle(title: string, role: SlideRole, isCjk: boolean): string {
+        if (!isCjk) {
+            return title;
+        }
+
+        const normalized = title.toLowerCase();
+        switch (role) {
+            case 'agenda':
+                return /agenda|deck map/.test(normalized) ? '内容导航' : title;
+            case 'summary':
+                return /summary|key takeaways?/.test(normalized) ? '核心总结' : title;
+            case 'next_step':
+                return /next steps?|action plan/.test(normalized) ? '下一步' : title;
+            case 'timeline':
+                return /^timeline$/.test(normalized) ? '时间线' : title;
+            case 'comparison':
+                return /^comparison$/.test(normalized) ? '对比分析' : title;
+            case 'process':
+                return /^process$/.test(normalized) ? '流程拆解' : title;
+            case 'data_highlight':
+                return /data highlight|highlight/.test(normalized) ? '重点数据' : title;
+            case 'key_insight':
+                return /key insight|insight/.test(normalized) ? '核心观点' : title;
+            case 'content':
+                return /^content$/.test(normalized) ? '核心内容' : title;
+            default:
+                return title;
+        }
+    }
+
+    private isPlannerArtifactText(text: string): boolean {
+        const normalized = this.cleanText(text, 300).toLowerCase();
+        if (!normalized) {
+            return false;
+        }
+
+        const patterns = [
+            /\bhelp .* understand\b/,
+            /\bpresentation framing\b/,
+            /\boverview-driven\b/,
+            /\btimeline-focused\b/,
+            /\bcomparison-driven\b/,
+            /\bprocess-oriented\b/,
+            /\bargument-led\b/,
+            /\baudience\s*:/,
+            /\bformat\s*:/,
+            /\bfocus\s*:/,
+            /\bstyle\s*:/,
+            /\blength\s*:/,
+            /\bcontent slides\b/,
+            /\bai-synthesized deck\b/,
+        ];
+
+        return patterns.some((pattern) => pattern.test(normalized));
+    }
+
+    private containsLongEnglishPhrase(text: string): boolean {
+        const cleaned = this.cleanText(text, 300);
+        const matches = cleaned.match(/[A-Za-z][A-Za-z-]*(?:\s+[A-Za-z][A-Za-z-]*)+/g) || [];
+        return matches.some((phrase) => {
+            const normalized = phrase.replace(/\s+/g, ' ').trim();
+            const wordCount = normalized.split(/\s+/).length;
+            const letterCount = (normalized.match(/[A-Za-z]/g) || []).length;
+            return wordCount >= 3 || letterCount >= 14;
+        });
     }
 
     private inferSlideRole(
@@ -740,21 +927,22 @@ export class PlannerService {
             const prevTitle = idx > 0 ? this.cleanText(docData.slides[idx - 1].title, 60) : '';
             const nextTitle = idx + 1 < docData.slides.length ? this.cleanText(docData.slides[idx + 1].title, 60) : '';
             const title = this.cleanText(slide.title, 80) || `Slide ${idx + 1}`;
+            const isCjk = this.isMostlyCjk(title);
             const existingBullets = this.normalizeBullets(slide.bullets, preferences.deckFormat === 'presenter' ? 4 : 6);
             const fallbackBullets = [
-                this.cleanText(`${title}: background and context`, 80),
-                prevTitle ? this.cleanText(`Connects from ${prevTitle}`, 80) : '',
-                nextTitle ? this.cleanText(`Leads into ${nextTitle}`, 80) : '',
+                this.cleanText(isCjk ? `${title}的背景与上下文` : `${title}: background and context`, 80),
+                prevTitle ? this.cleanText(isCjk ? `承接上一部分：${prevTitle}` : `Connects from ${prevTitle}`, 80) : '',
+                nextTitle ? this.cleanText(isCjk ? `引出下一部分：${nextTitle}` : `Leads into ${nextTitle}`, 80) : '',
                 mode === 'creative'
-                    ? this.cleanText(`${title}: practical takeaway for the audience`, 80)
-                    : this.cleanText(`${title}: key takeaway`, 80),
+                    ? this.cleanText(isCjk ? `${title}的实际启示` : `${title}: practical takeaway for the audience`, 80)
+                    : this.cleanText(isCjk ? `${title}的核心要点` : `${title}: key takeaway`, 80),
             ].filter(Boolean);
 
             const maxBullets = preferences.deckFormat === 'presenter' ? 4 : 6;
             const bullets = this.normalizeBullets([...existingBullets, ...fallbackBullets], maxBullets);
             const keyMessage =
                 this.cleanText(slide.keyMessage || slide.summary || bullets[0] || title, 140) ||
-                this.cleanText(`${title}: key message`, 140);
+                this.cleanText(isCjk ? `${title}：核心信息` : `${title}: key message`, 140);
             const summary = this.selectSummary(slide.summary || keyMessage, bullets, title);
 
             return {
@@ -954,14 +1142,21 @@ export class PlannerService {
 
             const maxBullets = preferences.deckFormat === 'presenter' ? 4 : 6;
             const mergedBullets = this.normalizeBullets([...slide.bullets, ...expansion.bullets], maxBullets);
+            const isCjk = this.isMostlyCjk(slide.title);
             const fallbackBullets =
                 mergedBullets.length >= 2
                     ? mergedBullets
                     : this.normalizeBullets(
                           [
                               ...mergedBullets,
-                              `${slide.title}: key information`,
-                              mode === 'creative' ? `${slide.title}: audience takeaway` : `${slide.title}: key takeaway`,
+                              isCjk ? `${slide.title}的关键信息` : `${slide.title}: key information`,
+                              mode === 'creative'
+                                  ? isCjk
+                                      ? `${slide.title}的受众启示`
+                                      : `${slide.title}: audience takeaway`
+                                  : isCjk
+                                    ? `${slide.title}的核心要点`
+                                    : `${slide.title}: key takeaway`,
                           ],
                           maxBullets,
                       );
@@ -1001,19 +1196,20 @@ export class PlannerService {
         const notes: string[] = [];
         const cleanTitle = this.cleanText(title, 80);
         const cleanMessage = this.cleanText(keyMessage, 140);
+        const isCjk = this.isMostlyCjk(cleanTitle);
         if (cleanMessage) {
-            notes.push(`Primary message: ${cleanMessage}`);
+            notes.push(isCjk ? `核心信息：${cleanMessage}` : `Primary message: ${cleanMessage}`);
         }
 
         if (preferences.deckFormat === 'presenter') {
-            if (bullets[0]) notes.push(`Open with ${cleanTitle} and explain why it matters.`);
-            if (bullets[1]) notes.push(`Expand on: ${this.cleanText(bullets[1], 120)}`);
+            if (bullets[0]) notes.push(isCjk ? `先用${cleanTitle}开场，说明它的重要性。` : `Open with ${cleanTitle} and explain why it matters.`);
+            if (bullets[1]) notes.push(isCjk ? `补充展开：${this.cleanText(bullets[1], 120)}` : `Expand on: ${this.cleanText(bullets[1], 120)}`);
             if (slideRole === 'summary' || slideRole === 'next_step') {
-                notes.push('Close with a clear recommendation or action cue.');
+                notes.push(isCjk ? '结尾强调明确建议或行动提示。' : 'Close with a clear recommendation or action cue.');
             }
         } else {
             bullets.slice(0, 3).forEach((bullet) => {
-                notes.push(`Supporting detail: ${this.cleanText(bullet, 140)}`);
+                notes.push(isCjk ? `补充说明：${this.cleanText(bullet, 140)}` : `Supporting detail: ${this.cleanText(bullet, 140)}`);
             });
         }
 
@@ -1275,28 +1471,29 @@ export class PlannerService {
     }
 
     private buildDefaultBreadcrumb(deckTitle: string, title: string, role: SlideRole): string {
-        const cleanDeck = this.cleanText(deckTitle, 36) || 'Presentation';
-        const cleanTitle = this.cleanText(title, 36) || 'Slide';
+        const isCjk = this.isMostlyCjk(deckTitle);
+        const cleanDeck = this.cleanText(deckTitle, 36) || (isCjk ? '演示文稿' : 'Presentation');
+        const cleanTitle = this.cleanText(title, 36) || (isCjk ? '内容页' : 'Slide');
 
         switch (role) {
             case 'agenda':
-                return `${cleanDeck} / Agenda`;
+                return `${cleanDeck} / ${isCjk ? '内容导航' : 'Agenda'}`;
             case 'section_divider':
-                return `${cleanDeck} / Section`;
+                return `${cleanDeck} / ${isCjk ? '章节过渡' : 'Section'}`;
             case 'timeline':
-                return `${cleanDeck} / Timeline`;
+                return `${cleanDeck} / ${isCjk ? '时间线' : 'Timeline'}`;
             case 'comparison':
-                return `${cleanDeck} / Comparison`;
+                return `${cleanDeck} / ${isCjk ? '对比分析' : 'Comparison'}`;
             case 'process':
-                return `${cleanDeck} / Process`;
+                return `${cleanDeck} / ${isCjk ? '流程拆解' : 'Process'}`;
             case 'data_highlight':
-                return `${cleanDeck} / Highlight`;
+                return `${cleanDeck} / ${isCjk ? '重点数据' : 'Highlight'}`;
             case 'summary':
-                return `${cleanDeck} / Wrap-up`;
+                return `${cleanDeck} / ${isCjk ? '核心总结' : 'Wrap-up'}`;
             case 'next_step':
-                return `${cleanDeck} / Action`;
+                return `${cleanDeck} / ${isCjk ? '下一步' : 'Action'}`;
             case 'key_insight':
-                return `${cleanDeck} / Insight`;
+                return `${cleanDeck} / ${isCjk ? '核心观点' : 'Insight'}`;
             default:
                 return `${cleanDeck} / ${cleanTitle}`;
         }
