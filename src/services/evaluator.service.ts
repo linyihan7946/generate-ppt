@@ -21,17 +21,18 @@ interface RenderedDeckInspection {
 }
 
 export class EvaluatorService {
-    private readonly logicWeight = 0.2;
-    private readonly layoutWeight = 0.16;
-    private readonly imageWeight = 0.14;
-    private readonly contentRichnessWeight = 0.2;
-    private readonly audienceFitWeight = 0.16;
-    private readonly consistencyWeight = 0.14;
+    private readonly logicWeight = 0.17;
+    private readonly layoutWeight = 0.14;
+    private readonly imageWeight = 0.12;
+    private readonly contentRichnessWeight = 0.15;
+    private readonly audienceFitWeight = 0.14;
+    private readonly consistencyWeight = 0.1;
+    private readonly sourceUnderstandingWeight = 0.18;
 
     async evaluate(docData: DocumentData, outputPath?: string): Promise<QualityReport> {
         const slides = docData.slides;
         const renderedDeck = await this.inspectRenderedDeck(outputPath, docData.title);
-        const metrics = this.computeMetrics(slides, renderedDeck);
+        const metrics = this.computeMetrics(docData, slides, renderedDeck);
 
         const logic = this.scoreLogic(docData, slides, metrics);
         const layout = this.scoreLayout(slides, metrics);
@@ -39,6 +40,7 @@ export class EvaluatorService {
         const contentRichness = this.scoreContentRichness(slides, metrics);
         const audienceFit = this.scoreAudienceFit(slides, metrics);
         const consistency = this.scoreConsistency(slides, metrics);
+        const sourceUnderstanding = this.scoreSourceUnderstanding(docData, slides, metrics);
 
         const overallScore = this.round(
             logic.weightedScore +
@@ -46,12 +48,13 @@ export class EvaluatorService {
                 imageSemantics.weightedScore +
                 contentRichness.weightedScore +
                 audienceFit.weightedScore +
-                consistency.weightedScore,
+                consistency.weightedScore +
+                sourceUnderstanding.weightedScore,
             1,
         );
 
         return {
-            version: 'v2',
+            version: 'v3',
             generatedAt: new Date().toISOString(),
             title: docData.title,
             outputPath,
@@ -64,6 +67,7 @@ export class EvaluatorService {
                 contentRichness,
                 audienceFit,
                 consistency,
+                sourceUnderstanding,
             },
             metrics,
             keyFindings: this.collectKeyFindings(
@@ -74,6 +78,7 @@ export class EvaluatorService {
                 contentRichness,
                 audienceFit,
                 consistency,
+                sourceUnderstanding,
             ),
             nextActions: this.collectNextActions(
                 logic,
@@ -82,6 +87,7 @@ export class EvaluatorService {
                 contentRichness,
                 audienceFit,
                 consistency,
+                sourceUnderstanding,
             ),
         };
     }
@@ -276,7 +282,7 @@ export class EvaluatorService {
         return (cleaned.match(/[\u4e00-\u9fff]/g) || []).length >= 6;
     }
 
-    private computeMetrics(slides: SlideContent[], renderedDeck: RenderedDeckInspection): QualityMetrics {
+    private computeMetrics(docData: DocumentData, slides: SlideContent[], renderedDeck: RenderedDeckInspection): QualityMetrics {
         const slideCount = slides.length;
         const slideWithImageCount = slides.filter((s) => s.images.length > 0).length;
         const slidesWithSummaryCount = slides.filter((s) => this.cleanText(s.summary || '').length > 0).length;
@@ -306,6 +312,7 @@ export class EvaluatorService {
             renderedImageCoverage >= 0.85 &&
             renderedTextCoverage <= 0.2 &&
             renderedDeck.renderedImageOnlySlideCount >= Math.max(3, Math.round(renderedDeck.renderedSlideCount * 0.6));
+        const sourceAwareMetrics = this.computeSourceAwareMetrics(docData, slides);
 
         return {
             slideCount,
@@ -344,6 +351,50 @@ export class EvaluatorService {
             renderedInstructionalTextSlideCount: renderedDeck.renderedInstructionalTextSlideCount,
             renderedMixedLanguageSlideCount: renderedDeck.renderedMixedLanguageSlideCount,
             visualFirstDeck,
+            ...sourceAwareMetrics,
+        };
+    }
+
+    private computeSourceAwareMetrics(
+        docData: DocumentData,
+        slides: SlideContent[],
+    ): Pick<
+        QualityMetrics,
+        | 'sourceContextAvailable'
+        | 'sourceTopicCoverage'
+        | 'sourceChapterCoverage'
+        | 'sourceSignalCoverage'
+        | 'sourceSignalCount'
+        | 'sourceRefCoverage'
+        | 'thesisAlignment'
+        | 'transformedTitleRatio'
+        | 'copiedTitleRatio'
+        | 'unsupportedTitleRatio'
+    > {
+        const sourceTopics = this.collectSourceTopics(docData);
+        const sourceChapters = this.collectSourceChapterTitles(docData);
+        const thesis = this.cleanText(docData.understanding?.thesis || docData.brief?.deckGoal || docData.title);
+        const sourceContextAvailable = sourceTopics.length > 0 || sourceChapters.length > 0 || thesis.length > 0;
+        const slideTexts = slides.map((slide) => this.collectSlideText(slide));
+        const sourceTopicCoverage = sourceTopics.length === 0 ? 1 : this.weightedPhraseCoverage(sourceTopics, slideTexts);
+        const sourceChapterCoverage = sourceChapters.length === 0 ? 1 : this.phraseCoverage(sourceChapters, slideTexts);
+        const { coverage: sourceSignalCoverage, count: sourceSignalCount } = this.computeSourceSignalCoverage(docData, slides);
+        const sourceRefCoverage =
+            slides.length === 0 ? 0 : slides.filter((slide) => (slide.sourceRefs || []).length > 0).length / slides.length;
+        const thesisAlignment = sourceContextAvailable ? this.computeThesisAlignment(docData, slides) : 0;
+        const titleRewriteMetrics = this.computeTitleRewriteMetrics(slides, sourceChapters, sourceTopics);
+
+        return {
+            sourceContextAvailable,
+            sourceTopicCoverage: this.round(sourceTopicCoverage, 3),
+            sourceChapterCoverage: this.round(sourceChapterCoverage, 3),
+            sourceSignalCoverage: this.round(sourceSignalCoverage, 3),
+            sourceSignalCount,
+            sourceRefCoverage: this.round(sourceRefCoverage, 3),
+            thesisAlignment: this.round(thesisAlignment, 3),
+            transformedTitleRatio: this.round(titleRewriteMetrics.transformedTitleRatio, 3),
+            copiedTitleRatio: this.round(titleRewriteMetrics.copiedTitleRatio, 3),
+            unsupportedTitleRatio: this.round(titleRewriteMetrics.unsupportedTitleRatio, 3),
         };
     }
 
@@ -810,6 +861,311 @@ export class EvaluatorService {
         };
     }
 
+    private scoreSourceUnderstanding(
+        docData: DocumentData,
+        slides: SlideContent[],
+        metrics: QualityMetrics,
+    ): QualityDimensionScore {
+        const evidence: string[] = [];
+        const issues: string[] = [];
+        const recommendations: string[] = [];
+
+        evidence.push(`Source topic coverage: ${(metrics.sourceTopicCoverage * 100).toFixed(1)}%.`);
+        evidence.push(`Source chapter coverage: ${(metrics.sourceChapterCoverage * 100).toFixed(1)}%.`);
+        evidence.push(`Thesis alignment: ${(metrics.thesisAlignment * 100).toFixed(1)}%.`);
+        evidence.push(`Title rewrite ratio: ${(metrics.transformedTitleRatio * 100).toFixed(1)}% transformed, ${(metrics.copiedTitleRatio * 100).toFixed(1)}% copied.`);
+        evidence.push(`Source ref coverage: ${(metrics.sourceRefCoverage * 100).toFixed(1)}%.`);
+
+        if (!metrics.sourceContextAvailable) {
+            evidence.push('Source understanding context is unavailable, so this dimension uses a neutral fallback.');
+            return {
+                name: 'Source Understanding',
+                score: 80,
+                weight: this.sourceUnderstandingWeight,
+                weightedScore: this.round(80 * this.sourceUnderstandingWeight, 1),
+                evidence,
+                issues,
+                recommendations,
+            };
+        }
+
+        let score = 100;
+        const understanding = docData.understanding;
+        const hasExplicitSignals = metrics.sourceSignalCount > 0;
+
+        if (metrics.sourceTopicCoverage < 0.75) {
+            score -= this.round((0.75 - metrics.sourceTopicCoverage) * 60, 1);
+            issues.push('Deck coverage of high-importance source topics is incomplete.');
+            recommendations.push('Make sure the major source topics appear explicitly in slide titles or key takeaways.');
+        } else if (metrics.sourceTopicCoverage >= 0.9) {
+            score += 4;
+            evidence.push('High-priority source topics are well covered.');
+        }
+
+        if (metrics.sourceChapterCoverage < 0.65) {
+            score -= this.round((0.65 - metrics.sourceChapterCoverage) * 36, 1);
+            issues.push('Some source chapters are weakly represented in the deck.');
+            recommendations.push('Preserve more chapter-level coverage when reorganizing the story.');
+        } else {
+            evidence.push('Chapter-level coverage looks stable.');
+        }
+
+        if (metrics.thesisAlignment < 0.18) {
+            score -= this.round((0.18 - metrics.thesisAlignment) * 45, 1);
+            issues.push('Deck narrative does not strongly reinforce the source thesis.');
+            recommendations.push('Strengthen the deck goal, opening message, and closing summary around the source thesis.');
+        } else if (metrics.thesisAlignment >= 0.28) {
+            score += 4;
+            evidence.push('Deck thesis stays aligned with the source thesis.');
+        }
+
+        if (hasExplicitSignals && metrics.sourceSignalCoverage < 0.75) {
+            score -= this.round((0.75 - metrics.sourceSignalCoverage) * 28, 1);
+            issues.push('Some structural source signals were not clearly preserved.');
+            recommendations.push('If the source emphasizes timeline, comparison, process, or key data, reflect that structure in slide roles.');
+        } else if (hasExplicitSignals) {
+            evidence.push('Structural source signals are preserved in the deck.');
+        }
+
+        if (metrics.sourceRefCoverage < 0.55 && slides.length >= 4) {
+            score -= this.round((0.55 - metrics.sourceRefCoverage) * 20, 1);
+            issues.push('Too few slides retain explicit source grounding references.');
+            recommendations.push('Keep sourceRefs on most slides so rewritten content stays traceable.');
+        } else if (metrics.sourceRefCoverage >= 0.7) {
+            evidence.push('Most slides retain source grounding references.');
+        }
+
+        if (metrics.unsupportedTitleRatio > 0.22) {
+            score -= this.round((metrics.unsupportedTitleRatio - 0.22) * 32, 1);
+            issues.push('Too many rewritten slide titles look weakly grounded in the source.');
+            recommendations.push('Rewrite titles boldly, but keep them tied to source topics or slide evidence.');
+        }
+
+        if (metrics.copiedTitleRatio > 0.78) {
+            score -= this.round((metrics.copiedTitleRatio - 0.78) * 26, 1);
+            issues.push('Too many slide titles are copied directly from source headings.');
+            recommendations.push('Rewrite some source headings into audience-facing presentation titles.');
+        }
+
+        if (metrics.transformedTitleRatio >= 0.35 && metrics.transformedTitleRatio <= 0.9 && metrics.unsupportedTitleRatio <= 0.2) {
+            score += 5;
+            evidence.push('Title rewriting shows a healthy balance between abstraction and grounding.');
+        } else if (metrics.transformedTitleRatio < 0.18 && metrics.copiedTitleRatio > 0.55) {
+            score -= 4;
+            issues.push('Narrative transformation is limited; the deck still reads close to the source outline.');
+            recommendations.push('Increase synthesis in titles and summaries instead of mirroring source headings too closely.');
+        }
+
+        const hasClosingSynthesis =
+            slides.some((slide) => slide.slideRole === 'summary' || slide.slideRole === 'next_step') ||
+            (docData.brief?.coreTakeaways || []).length > 0;
+        if (hasClosingSynthesis) {
+            evidence.push('Deck includes synthesized closing guidance or takeaways.');
+        } else if (slides.length >= 6) {
+            score -= 4;
+            issues.push('Deck lacks an obvious synthesis layer near the end.');
+            recommendations.push('Add a summary or next-step slide to show synthesis beyond source extraction.');
+        }
+
+        if (understanding?.topics?.length) {
+            evidence.push(`Source understanding topics available: ${understanding.topics.length}.`);
+        }
+
+        const boundedScore = this.clamp(this.round(score, 1), 0, 100);
+        const finalScore = issues.length > 0 ? Math.min(boundedScore, 98) : boundedScore;
+        return {
+            name: 'Source Understanding',
+            score: finalScore,
+            weight: this.sourceUnderstandingWeight,
+            weightedScore: this.round(finalScore * this.sourceUnderstandingWeight, 1),
+            evidence,
+            issues,
+            recommendations,
+        };
+    }
+
+    private collectSourceTopics(docData: DocumentData): Array<{ text: string; weight: number }> {
+        const topics = (docData.understanding?.topics || [])
+            .map((topic) => ({
+                text: this.cleanText(topic.title),
+                weight: Math.max(1, topic.importance || 1),
+            }))
+            .filter((topic) => topic.text.length > 0);
+
+        if (topics.length > 0) {
+            return topics.slice(0, 10);
+        }
+
+        return (docData.brief?.coreTakeaways || [])
+            .map((takeaway, index) => ({
+                text: this.cleanText(takeaway),
+                weight: Math.max(1, 4 - index),
+            }))
+            .filter((topic) => topic.text.length > 0)
+            .slice(0, 8);
+    }
+
+    private collectSourceChapterTitles(docData: DocumentData): string[] {
+        const titles = [
+            ...(docData.understanding?.chapterTitles || []),
+            ...(docData.brief?.chapterTitles || []),
+        ]
+            .map((title) => this.cleanText(title))
+            .filter(Boolean);
+
+        return Array.from(new Set(titles.map((title) => this.normalizeForCompare(title))))
+            .map((normalized) => titles.find((title) => this.normalizeForCompare(title) === normalized) || '')
+            .filter(Boolean)
+            .slice(0, 10);
+    }
+
+    private weightedPhraseCoverage(items: Array<{ text: string; weight: number }>, slideTexts: string[]): number {
+        if (items.length === 0) return 1;
+        const totalWeight = items.reduce((sum, item) => sum + Math.max(1, item.weight), 0);
+        if (totalWeight <= 0) return 1;
+
+        const coveredWeight = items.reduce((sum, item) => {
+            const match = this.maxPhraseMatch(item.text, slideTexts);
+            return sum + (match >= 0.18 ? Math.max(1, item.weight) : 0);
+        }, 0);
+
+        return coveredWeight / totalWeight;
+    }
+
+    private phraseCoverage(phrases: string[], slideTexts: string[]): number {
+        if (phrases.length === 0) return 1;
+        const covered = phrases.filter((phrase) => this.maxPhraseMatch(phrase, slideTexts) >= 0.18).length;
+        return covered / phrases.length;
+    }
+
+    private computeSourceSignalCoverage(docData: DocumentData, slides: SlideContent[]): { coverage: number; count: number } {
+        const understanding = docData.understanding;
+        const checks: boolean[] = [];
+
+        if ((understanding?.timelineSignals || []).length > 0) {
+            checks.push(this.deckHasRoleOrPattern(slides, ['timeline'], /\b(18|19|20)\d{2}\b|年|阶段|历程|演进|timeline|history/i));
+        }
+        if ((understanding?.comparisonSignals || []).length > 0) {
+            checks.push(this.deckHasRoleOrPattern(slides, ['comparison'], /对比|比较|区别|差异|优势|劣势|compare|versus|vs\b/i));
+        }
+        if ((understanding?.processSignals || []).length > 0) {
+            checks.push(this.deckHasRoleOrPattern(slides, ['process'], /流程|步骤|方法|实施|推进|落地|process|workflow|step\b/i));
+        }
+        if ((understanding?.keyNumbers || []).length > 0) {
+            checks.push(this.deckHasRoleOrPattern(slides, ['data_highlight'], /\b\d+(?:\.\d+)?%?\b|数据|指标|增长|占比/i));
+        }
+
+        if (checks.length === 0) {
+            return { coverage: 1, count: 0 };
+        }
+
+        const covered = checks.filter(Boolean).length;
+        return { coverage: covered / checks.length, count: checks.length };
+    }
+
+    private computeThesisAlignment(docData: DocumentData, slides: SlideContent[]): number {
+        const thesis = this.cleanText(docData.understanding?.thesis || docData.brief?.deckGoal || docData.title);
+        if (!thesis) {
+            return 0;
+        }
+
+        const summarySlides = slides.filter((slide) => slide.slideRole === 'summary' || slide.slideRole === 'next_step');
+        const narrativeWindow = [
+            this.cleanText(docData.brief?.deckGoal || ''),
+            (docData.brief?.coreTakeaways || []).join(' '),
+            ...slides.slice(0, 3).map((slide) => this.collectSlideText(slide)),
+            ...summarySlides.slice(0, 2).map((slide) => this.collectSlideText(slide)),
+            slides.length > 0 ? this.collectSlideText(slides[slides.length - 1]) : '',
+        ].join(' ');
+
+        return this.comparePhraseToText(thesis, narrativeWindow);
+    }
+
+    private computeTitleRewriteMetrics(
+        slides: SlideContent[],
+        sourceChapters: string[],
+        sourceTopics: Array<{ text: string; weight: number }>,
+    ): { transformedTitleRatio: number; copiedTitleRatio: number; unsupportedTitleRatio: number } {
+        const sourcePhrases = Array.from(
+            new Set(
+                [...sourceChapters, ...sourceTopics.map((topic) => topic.text)]
+                    .map((text) => this.cleanText(text))
+                    .filter(Boolean),
+            ),
+        );
+
+        const eligibleSlides = slides.filter((slide) => !this.isUtilityRole(slide.slideRole) && this.cleanText(slide.title).length > 0);
+        if (eligibleSlides.length === 0 || sourcePhrases.length === 0) {
+            return {
+                transformedTitleRatio: 0,
+                copiedTitleRatio: 0,
+                unsupportedTitleRatio: 0,
+            };
+        }
+
+        let transformed = 0;
+        let copied = 0;
+        let unsupported = 0;
+
+        eligibleSlides.forEach((slide) => {
+            const title = this.cleanText(slide.title);
+            const exactCopied = sourcePhrases.some((phrase) => this.normalizeForCompare(phrase) === this.normalizeForCompare(title));
+            const sourceMatch = this.maxPhraseMatch(title, sourcePhrases);
+            const titleSupport = this.comparePhraseToText(title, [slide.summary || '', slide.keyMessage || '', slide.bullets.join(' ')].join(' '));
+            const grounded = exactCopied || sourceMatch >= 0.18 || ((slide.sourceRefs || []).length > 0 && titleSupport >= 0.1);
+
+            if (exactCopied) {
+                copied += 1;
+            } else if (grounded) {
+                transformed += 1;
+            } else {
+                unsupported += 1;
+            }
+        });
+
+        return {
+            transformedTitleRatio: transformed / eligibleSlides.length,
+            copiedTitleRatio: copied / eligibleSlides.length,
+            unsupportedTitleRatio: unsupported / eligibleSlides.length,
+        };
+    }
+
+    private deckHasRoleOrPattern(slides: SlideContent[], roles: string[], pattern: RegExp): boolean {
+        return slides.some((slide) => {
+            const roleMatch = slide.slideRole ? roles.includes(slide.slideRole) : false;
+            const textMatch = pattern.test(this.collectSlideText(slide));
+            return roleMatch || textMatch;
+        });
+    }
+
+    private comparePhraseToText(phrase: string, text: string): number {
+        const left = this.cleanText(phrase);
+        const right = this.cleanText(text);
+        if (!left || !right) return 0;
+
+        const leftNorm = this.normalizeForCompare(left);
+        const rightNorm = this.normalizeForCompare(right);
+        if (!leftNorm || !rightNorm) return 0;
+
+        if (rightNorm.includes(leftNorm) || leftNorm.includes(rightNorm)) {
+            return 1;
+        }
+
+        return this.keywordOverlap(this.extractKeywords(left), this.extractKeywords(right));
+    }
+
+    private maxPhraseMatch(phrase: string, candidates: string[]): number {
+        let max = 0;
+        candidates.forEach((candidate) => {
+            max = Math.max(max, this.comparePhraseToText(phrase, candidate));
+        });
+        return max;
+    }
+
+    private isUtilityRole(role?: string): boolean {
+        return role === 'agenda' || role === 'summary' || role === 'next_step' || role === 'section_divider';
+    }
+
     private countLevelJumpViolations(slides: SlideContent[]): number {
         let violations = 0;
         for (let i = 1; i < slides.length; i += 1) {
@@ -1075,6 +1431,7 @@ export class EvaluatorService {
         richness: QualityDimensionScore,
         audience: QualityDimensionScore,
         consistency: QualityDimensionScore,
+        sourceUnderstanding: QualityDimensionScore,
     ): string[] {
         const findings: string[] = [];
         findings.push(
@@ -1082,7 +1439,12 @@ export class EvaluatorService {
         );
         findings.push(`Summary coverage ${(metrics.summaryCoverage * 100).toFixed(1)}%, sparse slides ${metrics.sparseContentSlideCount} (severe ${metrics.severeSparseContentSlideCount}).`);
         findings.push(`Titles: duplicate ${metrics.duplicateTitleCount}, generic ${metrics.genericTitleCount}; weak transitions ${metrics.weakTransitionCount}.`);
-        findings.push(`Scores -> Logic ${logic.score}, Layout ${layout.score}, Image ${image.score}, Richness ${richness.score}, Audience ${audience.score}, Consistency ${consistency.score}.`);
+        findings.push(
+            `Source coverage topics/chapters ${(metrics.sourceTopicCoverage * 100).toFixed(1)}% / ${(metrics.sourceChapterCoverage * 100).toFixed(1)}%, thesis alignment ${(metrics.thesisAlignment * 100).toFixed(1)}%.`,
+        );
+        findings.push(
+            `Scores -> Logic ${logic.score}, Layout ${layout.score}, Image ${image.score}, Richness ${richness.score}, Audience ${audience.score}, Consistency ${consistency.score}, Source ${sourceUnderstanding.score}.`,
+        );
         if (metrics.fallbackImageCount > 0) {
             findings.push(`Fallback images used on ${metrics.fallbackImageCount} slides.`);
         }
@@ -1154,6 +1516,7 @@ export class EvaluatorService {
         lines.push(`| ${report.dimensions.contentRichness.name} | ${report.dimensions.contentRichness.score} | ${report.dimensions.contentRichness.weight} | ${report.dimensions.contentRichness.weightedScore} |`);
         lines.push(`| ${report.dimensions.audienceFit.name} | ${report.dimensions.audienceFit.score} | ${report.dimensions.audienceFit.weight} | ${report.dimensions.audienceFit.weightedScore} |`);
         lines.push(`| ${report.dimensions.consistency.name} | ${report.dimensions.consistency.score} | ${report.dimensions.consistency.weight} | ${report.dimensions.consistency.weightedScore} |`);
+        lines.push(`| ${report.dimensions.sourceUnderstanding.name} | ${report.dimensions.sourceUnderstanding.score} | ${report.dimensions.sourceUnderstanding.weight} | ${report.dimensions.sourceUnderstanding.weightedScore} |`);
         lines.push('', '## Metrics', '', '```json', JSON.stringify(report.metrics, null, 2), '```', '', '## Key Findings', '');
         report.keyFindings.forEach((finding) => lines.push(`- ${finding}`));
         lines.push('', '## Suggested Next Actions', '');

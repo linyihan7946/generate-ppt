@@ -125,6 +125,16 @@ export interface QualityMetrics {
     renderedInstructionalTextSlideCount: number;
     renderedMixedLanguageSlideCount: number;
     visualFirstDeck: boolean;
+    sourceContextAvailable: boolean;
+    sourceTopicCoverage: number;
+    sourceChapterCoverage: number;
+    sourceSignalCoverage: number;
+    sourceSignalCount: number;
+    sourceRefCoverage: number;
+    thesisAlignment: number;
+    transformedTitleRatio: number;
+    copiedTitleRatio: number;
+    unsupportedTitleRatio: number;
 }
 
 export interface QualityReport {
@@ -141,6 +151,7 @@ export interface QualityReport {
         contentRichness: QualityDimensionScore;
         audienceFit: QualityDimensionScore;
         consistency: QualityDimensionScore;
+        sourceUnderstanding: QualityDimensionScore;
     };
     metrics: QualityMetrics;
     keyFindings: string[];

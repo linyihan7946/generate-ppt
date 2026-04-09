@@ -478,12 +478,15 @@ readme.md                        面向使用者的说明
 - `contentRichness`
 - `audienceFit`
 - `consistency`
+- `sourceUnderstanding`
 
 ### 它的一个重要特点
 
 除了看 `DocumentData`，它还会直接解析已经生成的 `.pptx` 内部 XML，提取“最终可见文本”再做检查。
 
 新版评估还会识别渲染后的图片覆盖情况，并对“整页图片化 / image-first”的 deck 放宽一部分纯文字启发式惩罚，避免高质量视觉型 PPT 因为可提取文字过少而被系统性低估。
+
+同时，评估器现在会额外衡量 deck 对原始文档的“理解与重写”质量，包括主题覆盖、章节覆盖、结构信号保留、thesis 对齐、sourceRefs 覆盖，以及“是否只是照搬标题”还是做了有根据的演示化改写。
 
 这非常关键，因为有些问题只会在渲染后暴露，例如：
 
