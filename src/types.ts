@@ -116,9 +116,15 @@ export interface QualityMetrics {
     promptAlignmentAvg: number;
     fallbackImageCount: number;
     renderedSlideCount: number;
+    renderedSlideWithImageCount: number;
+    renderedImageCoverage: number;
+    renderedTextCoverage: number;
+    renderedImageOnlySlideCount: number;
+    renderedUniqueImageCount: number;
     renderedMetaArtifactSlideCount: number;
     renderedInstructionalTextSlideCount: number;
     renderedMixedLanguageSlideCount: number;
+    visualFirstDeck: boolean;
 }
 
 export interface QualityReport {

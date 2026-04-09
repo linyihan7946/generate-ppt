@@ -11,6 +11,10 @@ import {
 
 interface RenderedDeckInspection {
     renderedSlideCount: number;
+    renderedSlideWithTextCount: number;
+    renderedSlideWithImageCount: number;
+    renderedImageOnlySlideCount: number;
+    renderedUniqueImageCount: number;
     renderedMetaArtifactSlideCount: number;
     renderedInstructionalTextSlideCount: number;
     renderedMixedLanguageSlideCount: number;
@@ -113,17 +117,36 @@ export class EvaluatorService {
             }
 
             const slideTexts = await Promise.all(
-                slideEntries.map(async (name) => this.extractRenderedSlideText(await zip.files[name].async('string'))),
+                slideEntries.map(async (name) => {
+                    const slideXml = await zip.files[name].async('string');
+                    const slideNumber = this.extractSlideNumber(name);
+                    const relName = `ppt/slides/_rels/slide${slideNumber}.xml.rels`;
+                    const relXml = zip.files[relName] ? await zip.files[relName].async('string') : '';
+                    const text = this.extractRenderedSlideText(slideXml);
+                    const imageTargets = this.extractRenderedImageTargets(relXml, name, slideXml);
+                    return {
+                        text,
+                        imageTargets,
+                    };
+                }),
             );
-            const dominantLanguage = this.detectDominantLanguage([deckTitle, ...slideTexts].join(' '));
+            const dominantLanguage = this.detectDominantLanguage([deckTitle, ...slideTexts.map((item) => item.text)].join(' '));
+            const uniqueImageTargets = new Set(slideTexts.flatMap((item) => item.imageTargets));
 
             return {
                 renderedSlideCount: slideTexts.length,
-                renderedMetaArtifactSlideCount: slideTexts.filter((text) => this.hasRenderedMetaArtifact(text)).length,
-                renderedInstructionalTextSlideCount: slideTexts.filter((text) => this.hasRenderedInstructionalArtifact(text))
-                    .length,
-                renderedMixedLanguageSlideCount: slideTexts.filter((text) =>
-                    this.hasRenderedMixedLanguageNarration(text, dominantLanguage),
+                renderedSlideWithTextCount: slideTexts.filter((item) => this.cleanText(item.text).length > 0).length,
+                renderedSlideWithImageCount: slideTexts.filter((item) => item.imageTargets.length > 0).length,
+                renderedImageOnlySlideCount: slideTexts.filter(
+                    (item) => item.imageTargets.length > 0 && this.cleanText(item.text).length < 12,
+                ).length,
+                renderedUniqueImageCount: uniqueImageTargets.size,
+                renderedMetaArtifactSlideCount: slideTexts.filter((item) => this.hasRenderedMetaArtifact(item.text)).length,
+                renderedInstructionalTextSlideCount: slideTexts.filter((item) =>
+                    this.hasRenderedInstructionalArtifact(item.text),
+                ).length,
+                renderedMixedLanguageSlideCount: slideTexts.filter((item) =>
+                    this.hasRenderedMixedLanguageNarration(item.text, dominantLanguage),
                 ).length,
             };
         } catch (error: any) {
@@ -135,6 +158,10 @@ export class EvaluatorService {
     private emptyRenderedDeckInspection(): RenderedDeckInspection {
         return {
             renderedSlideCount: 0,
+            renderedSlideWithTextCount: 0,
+            renderedSlideWithImageCount: 0,
+            renderedImageOnlySlideCount: 0,
+            renderedUniqueImageCount: 0,
             renderedMetaArtifactSlideCount: 0,
             renderedInstructionalTextSlideCount: 0,
             renderedMixedLanguageSlideCount: 0,
@@ -149,6 +176,27 @@ export class EvaluatorService {
     private extractRenderedSlideText(xml: string): string {
         const textRuns = Array.from(xml.matchAll(/<a:t[^>]*>([\s\S]*?)<\/a:t>/g), (match) => this.decodeXmlEntities(match[1]));
         return this.cleanText(textRuns.join(' '));
+    }
+
+    private extractRenderedImageTargets(relXml: string, fallbackId: string, slideXml: string): string[] {
+        const targets = new Set<string>();
+        const relMatches = Array.from(
+            relXml.matchAll(/<Relationship\b[^>]*Type="([^"]+)"[^>]*Target="([^"]+)"/gi),
+        );
+
+        relMatches.forEach((match) => {
+            const type = match[1] || '';
+            const target = match[2] || '';
+            if (/\/image$/i.test(type) || /(?:^|\/)media\//i.test(target) || /\.\.\/media\//i.test(target)) {
+                targets.add(target.replace(/^(\.\.\/)+/g, 'ppt/'));
+            }
+        });
+
+        if (targets.size === 0 && /<p:pic\b/i.test(slideXml)) {
+            targets.add(`inline:${fallbackId}`);
+        }
+
+        return Array.from(targets);
     }
 
     private decodeXmlEntities(text: string): string {
@@ -249,6 +297,15 @@ export class EvaluatorService {
         const overlaySlideCount = slides.filter((s) => s.layout !== 'image_only').length;
         const imageOnlySlideCount = slides.filter((s) => s.layout === 'image_only').length;
         const dominantLayoutRatio = slideCount === 0 ? 0 : Math.max(overlaySlideCount, imageOnlySlideCount) / slideCount;
+        const renderedImageCoverage =
+            renderedDeck.renderedSlideCount === 0 ? 0 : renderedDeck.renderedSlideWithImageCount / renderedDeck.renderedSlideCount;
+        const renderedTextCoverage =
+            renderedDeck.renderedSlideCount === 0 ? 0 : renderedDeck.renderedSlideWithTextCount / renderedDeck.renderedSlideCount;
+        const visualFirstDeck =
+            renderedDeck.renderedSlideCount >= 4 &&
+            renderedImageCoverage >= 0.85 &&
+            renderedTextCoverage <= 0.2 &&
+            renderedDeck.renderedImageOnlySlideCount >= Math.max(3, Math.round(renderedDeck.renderedSlideCount * 0.6));
 
         return {
             slideCount,
@@ -278,9 +335,15 @@ export class EvaluatorService {
             fallbackImageCount: slides.filter((s) => s.imageSource === 'ai_fallback' || s.imageSource === 'placeholder')
                 .length,
             renderedSlideCount: renderedDeck.renderedSlideCount,
+            renderedSlideWithImageCount: renderedDeck.renderedSlideWithImageCount,
+            renderedImageCoverage: this.round(renderedImageCoverage, 3),
+            renderedTextCoverage: this.round(renderedTextCoverage, 3),
+            renderedImageOnlySlideCount: renderedDeck.renderedImageOnlySlideCount,
+            renderedUniqueImageCount: renderedDeck.renderedUniqueImageCount,
             renderedMetaArtifactSlideCount: renderedDeck.renderedMetaArtifactSlideCount,
             renderedInstructionalTextSlideCount: renderedDeck.renderedInstructionalTextSlideCount,
             renderedMixedLanguageSlideCount: renderedDeck.renderedMixedLanguageSlideCount,
+            visualFirstDeck,
         };
     }
 
@@ -289,33 +352,42 @@ export class EvaluatorService {
         const issues: string[] = [];
         const recommendations: string[] = [];
         let score = 100;
+        const visualFirstDeck = metrics.visualFirstDeck;
+        const textHeuristicLimited = this.shouldDownweightTextHeuristics(metrics);
 
         evidence.push(`Average bullets: ${metrics.avgBulletsPerSlide}`);
         evidence.push(`Level jumps: ${metrics.levelJumpViolations}`);
         evidence.push(`Weak transitions: ${metrics.weakTransitionCount}`);
+        if (visualFirstDeck) {
+            evidence.push('Rendered deck is image-first, so text-only logic heuristics are downweighted.');
+        }
 
         const emptyTitleCount = slides.filter((s) => this.cleanText(s.title).length === 0).length;
-        if (emptyTitleCount > 0) {
+        if (emptyTitleCount > 0 && !textHeuristicLimited) {
             score -= emptyTitleCount * 10;
             issues.push(`${emptyTitleCount} slides have empty titles.`);
             recommendations.push('Ensure every slide has a concise title.');
+        } else if (emptyTitleCount > 0) {
+            evidence.push('Empty-title penalty was relaxed because the rendered deck exposes very little text.');
         }
         if (metrics.duplicateTitleCount > 0) {
             score -= metrics.duplicateTitleCount * 4;
             issues.push(`${metrics.duplicateTitleCount} duplicate slide titles detected.`);
             recommendations.push('Rename duplicate titles to highlight unique points.');
         }
-        if (metrics.genericTitleCount > 0) {
+        if (metrics.genericTitleCount > 0 && !textHeuristicLimited) {
             score -= metrics.genericTitleCount * 3;
             issues.push(`${metrics.genericTitleCount} titles are generic.`);
             recommendations.push('Use specific, topic-driven title wording.');
+        } else if (metrics.genericTitleCount > 0) {
+            evidence.push('Generic-title penalty was relaxed because titles are not machine-readable in the rendered deck.');
         }
         if (metrics.levelJumpViolations > 0) {
             score -= metrics.levelJumpViolations * 6;
             issues.push(`${metrics.levelJumpViolations} hierarchy jumps detected.`);
             recommendations.push('Keep neighboring levels close to maintain narrative continuity.');
         }
-        if (metrics.weakTransitionCount > 0) {
+        if (metrics.weakTransitionCount > 0 && !textHeuristicLimited) {
             score -= Math.min(20, metrics.weakTransitionCount * 4);
             issues.push(`${metrics.weakTransitionCount} transitions appear disconnected.`);
             recommendations.push('Add transitional context between neighboring slides.');
@@ -332,6 +404,8 @@ export class EvaluatorService {
         if (metrics.avgBulletsPerSlide >= 2 && metrics.avgBulletsPerSlide <= 5) {
             score += 3;
             evidence.push('Bullet density stays in the recommended range (2-5).');
+        } else if (textHeuristicLimited) {
+            evidence.push('Bullet-density penalty was skipped because this rendered deck is primarily visual.');
         } else {
             score -= 4;
             issues.push('Bullet density is outside recommended range (2-5).');
@@ -361,14 +435,19 @@ export class EvaluatorService {
         const issues: string[] = [];
         const recommendations: string[] = [];
         let score = 100;
+        const effectiveImageCoverage = this.effectiveImageCoverage(metrics);
+        const effectiveNoImageSlides = Math.max(0, Math.round((1 - effectiveImageCoverage) * metrics.slideCount));
 
-        evidence.push(`Image coverage: ${(metrics.imageCoverage * 100).toFixed(1)}%.`);
+        evidence.push(`Planned image coverage: ${(metrics.imageCoverage * 100).toFixed(1)}%.`);
+        evidence.push(`Rendered image coverage: ${(metrics.renderedImageCoverage * 100).toFixed(1)}%.`);
         evidence.push(`Layout dominance: ${(metrics.dominantLayoutRatio * 100).toFixed(1)}%.`);
+        if (metrics.visualFirstDeck) {
+            evidence.push('Rendered output behaves like an image-first deck.');
+        }
 
-        const noImageSlides = metrics.slideCount - metrics.slideWithImageCount;
-        if (noImageSlides > 0) {
-            score -= noImageSlides * 8;
-            issues.push(`${noImageSlides} slides have no image.`);
+        if (effectiveNoImageSlides > 0) {
+            score -= effectiveNoImageSlides * 8;
+            issues.push(`${effectiveNoImageSlides} slides have no image.`);
             recommendations.push('Add one image per content slide whenever possible.');
         }
         if (metrics.overflowRiskSlideCount > 0) {
@@ -387,7 +466,8 @@ export class EvaluatorService {
             evidence.push('No planner/debug metadata found in rendered slide text.');
         }
         if (metrics.dominantLayoutRatio > 0.9 && metrics.slideCount >= 6) {
-            score -= this.round((metrics.dominantLayoutRatio - 0.9) * 60, 1);
+            const repetitionPenalty = this.round((metrics.dominantLayoutRatio - 0.9) * 60, 1) * (metrics.visualFirstDeck ? 0.4 : 1);
+            score -= repetitionPenalty;
             issues.push('Layout style is too repetitive.');
             recommendations.push('Mix overlay and image-only layouts for better rhythm.');
         } else if (metrics.slideCount >= 6) {
@@ -400,7 +480,7 @@ export class EvaluatorService {
             issues.push(`${denseOverlaySlides} overlay slides are text-heavy.`);
             recommendations.push('Switch dense slides to image-only or shorten text.');
         }
-        if (metrics.imageCoverage >= 0.95) {
+        if (effectiveImageCoverage >= 0.95) {
             score += 4;
             evidence.push('Visual coverage is strong.');
         }
@@ -423,20 +503,31 @@ export class EvaluatorService {
         const issues: string[] = [];
         const recommendations: string[] = [];
         let score = 100;
+        const effectiveImageCoverage = this.effectiveImageCoverage(metrics);
+        const visualRichnessRatio = this.renderedVisualDiversity(metrics);
+        const alignmentPenaltyMultiplier = metrics.visualFirstDeck ? 0.35 : 1;
 
         evidence.push(`Prompt coverage: ${(metrics.promptCoverage * 100).toFixed(1)}%.`);
         evidence.push(`Prompt alignment: ${(metrics.promptAlignmentAvg * 100).toFixed(1)}%.`);
         evidence.push(`Fallback images: ${metrics.fallbackImageCount}.`);
+        evidence.push(`Rendered image coverage: ${(metrics.renderedImageCoverage * 100).toFixed(1)}%.`);
+        if (metrics.renderedSlideWithImageCount > 0) {
+            evidence.push(`Rendered image diversity: ${(visualRichnessRatio * 100).toFixed(1)}%.`);
+        }
+        if (metrics.visualFirstDeck) {
+            evidence.push('Rendered deck is image-first, so prompt-based image checks are downweighted.');
+        }
 
         const missingPromptSlides = metrics.slideCount - metrics.slidesWithPromptCount;
         if (missingPromptSlides > 0) {
-            score -= missingPromptSlides * 5;
+            const promptPenalty = missingPromptSlides * 5 * (metrics.visualFirstDeck ? 0.35 : 1);
+            score -= promptPenalty;
             issues.push(`${missingPromptSlides} slides are missing image prompts.`);
             recommendations.push('Provide imagePrompt for each slide.');
         }
         const lowAlignSlides = slides.filter((s) => this.promptAlignment(s) < 0.2).length;
         if (lowAlignSlides > 0) {
-            score -= lowAlignSlides * 4;
+            score -= lowAlignSlides * 4 * alignmentPenaltyMultiplier;
             issues.push(`${lowAlignSlides} slides show weak image-text alignment.`);
             recommendations.push('Use title/summary/bullet keywords in prompts.');
         }
@@ -446,18 +537,27 @@ export class EvaluatorService {
             recommendations.push('Improve prompt robustness and retry strategy.');
         }
         if (metrics.promptCoverage < 0.85) {
-            score -= this.round((0.85 - metrics.promptCoverage) * 40, 1);
+            const promptCoveragePenalty = this.round((0.85 - metrics.promptCoverage) * 40, 1) * (metrics.visualFirstDeck ? 0.35 : 1);
+            score -= promptCoveragePenalty;
             issues.push('Prompt coverage is below 85%.');
             recommendations.push('Keep prompt coverage above 85%.');
         }
-        if (metrics.imageCoverage < 0.9) {
-            score -= this.round((0.9 - metrics.imageCoverage) * 40, 1);
+        if (effectiveImageCoverage < 0.9) {
+            score -= this.round((0.9 - effectiveImageCoverage) * 40, 1);
             issues.push('Image coverage is below 90%.');
             recommendations.push('Increase image generation coverage.');
         }
         if (metrics.promptAlignmentAvg >= 0.45) {
             score += 4;
             evidence.push('Prompt semantics generally align with content.');
+        }
+        if (metrics.visualFirstDeck && metrics.renderedImageCoverage >= 0.95) {
+            score += 4;
+            evidence.push('Rendered image coverage is strong enough to support image-led storytelling.');
+        }
+        if (visualRichnessRatio >= 0.85 && metrics.renderedSlideWithImageCount >= 4) {
+            score += 3;
+            evidence.push('Rendered imagery stays visually diverse across slides.');
         }
 
         const boundedScore = this.clamp(this.round(score, 1), 0, 100);
@@ -478,37 +578,59 @@ export class EvaluatorService {
         const issues: string[] = [];
         const recommendations: string[] = [];
         let score = 100;
+        const visualFirstDeck = metrics.visualFirstDeck;
+        const sparsePenaltyMultiplier = visualFirstDeck ? 0.15 : 1;
+        const visualRichnessRatio = this.renderedVisualDiversity(metrics);
 
         evidence.push(`Average text length: ${metrics.avgTextLengthPerSlide}.`);
         evidence.push(`Sparse slides: ${metrics.sparseContentSlideCount} (severe: ${metrics.severeSparseContentSlideCount}).`);
         evidence.push(`Summary coverage: ${(metrics.summaryCoverage * 100).toFixed(1)}%.`);
+        if (visualFirstDeck) {
+            evidence.push(`Rendered image coverage: ${(metrics.renderedImageCoverage * 100).toFixed(1)}%.`);
+            if (metrics.renderedSlideWithImageCount > 0) {
+                evidence.push(`Rendered image diversity: ${(visualRichnessRatio * 100).toFixed(1)}%.`);
+            }
+            evidence.push('Content richness is being evaluated partly through visual storytelling rather than text only.');
+        }
 
         if (metrics.severeSparseContentSlideCount > 0) {
-            score -= Math.min(45, metrics.severeSparseContentSlideCount * 11);
+            score -= Math.min(45, metrics.severeSparseContentSlideCount * 11) * sparsePenaltyMultiplier;
             issues.push(`${metrics.severeSparseContentSlideCount} slides are severely sparse.`);
             recommendations.push('Expand severe sparse slides to at least 2 bullets + a takeaway.');
         }
         if (metrics.sparseContentSlideCount > 0) {
-            score -= Math.min(30, metrics.sparseContentSlideCount * 6);
+            score -= Math.min(30, metrics.sparseContentSlideCount * 6) * sparsePenaltyMultiplier;
             issues.push(`${metrics.sparseContentSlideCount} slides are content-sparse.`);
             recommendations.push('Use model expansion for sparse slides while preserving source facts.');
         }
-        if (metrics.avgBulletsPerSlide < 1.8) {
+        if (metrics.avgBulletsPerSlide < 1.8 && !visualFirstDeck) {
             score -= Math.min(18, this.round((1.8 - metrics.avgBulletsPerSlide) * 12, 1));
             issues.push('Average bullets per slide is too low.');
             recommendations.push('Keep average bullets close to 2-5.');
+        } else if (visualFirstDeck) {
+            evidence.push('Low bullet density is acceptable for an image-first rendered deck.');
         }
-        if (metrics.avgTextLengthPerSlide < 70) {
+        if (metrics.avgTextLengthPerSlide < 70 && !visualFirstDeck) {
             score -= Math.min(16, this.round((70 - metrics.avgTextLengthPerSlide) * 0.25, 1));
             issues.push('Average text length is too short.');
             recommendations.push('Add concise context to low-information slides.');
+        } else if (visualFirstDeck) {
+            evidence.push('Low visible text is expected here; visual density is used as a compensating signal.');
         }
-        if (metrics.summaryCoverage < 0.65 && metrics.slideCount >= 5) {
+        if (metrics.summaryCoverage < 0.65 && metrics.slideCount >= 5 && !visualFirstDeck) {
             score -= Math.min(12, this.round((0.65 - metrics.summaryCoverage) * 30, 1));
             issues.push('Summary coverage is low.');
             recommendations.push('Add summary lines to most non-cover slides.');
         } else {
             evidence.push('Summary coverage is acceptable.');
+        }
+        if (visualFirstDeck && metrics.renderedImageCoverage >= 0.95) {
+            score += 6;
+            evidence.push('Rendered image coverage strongly supports visual richness.');
+        }
+        if (visualFirstDeck && visualRichnessRatio >= 0.85 && metrics.renderedSlideWithImageCount >= 4) {
+            score += 6;
+            evidence.push('Most slides use distinct imagery, which increases content richness.');
         }
 
         const boundedScore = this.clamp(this.round(score, 1), 0, 100);
@@ -529,14 +651,18 @@ export class EvaluatorService {
         const issues: string[] = [];
         const recommendations: string[] = [];
         let score = 100;
+        const audiencePenaltyMultiplier = metrics.visualFirstDeck ? 0.35 : 1;
 
         const actionCueCoverage = metrics.slideCount === 0 ? 0 : metrics.actionCueSlideCount / metrics.slideCount;
         evidence.push(`Action-cue coverage: ${(actionCueCoverage * 100).toFixed(1)}%.`);
         evidence.push(`Average bullet length: ${metrics.avgBulletLength}.`);
         evidence.push(`Mixed-language rendered slides: ${metrics.renderedMixedLanguageSlideCount}.`);
+        if (metrics.visualFirstDeck) {
+            evidence.push('Audience-fit text penalties are downweighted for this image-first deck.');
+        }
 
         if (actionCueCoverage < 0.15 && metrics.slideCount >= 6) {
-            score -= Math.min(18, this.round((0.15 - actionCueCoverage) * 80, 1));
+            score -= Math.min(18, this.round((0.15 - actionCueCoverage) * 80, 1)) * audiencePenaltyMultiplier;
             issues.push('Action/takeaway guidance is too sparse.');
             recommendations.push('Add takeaway language on milestone slides.');
         }
@@ -556,7 +682,7 @@ export class EvaluatorService {
             recommendations.push('Use speech-friendly short bullets.');
         }
         if (metrics.summaryCoverage < 0.55 && metrics.slideCount >= 5) {
-            score -= 8;
+            score -= 8 * audiencePenaltyMultiplier;
             issues.push('Low summary coverage hurts first-glance readability.');
             recommendations.push('Improve summary coverage for audience orientation.');
         }
@@ -573,10 +699,12 @@ export class EvaluatorService {
             evidence.push('Rendered slide language stays broadly consistent.');
         }
         const lastSlide = slides[slides.length - 1];
-        if (lastSlide && !this.hasActionCue(this.collectSlideText(lastSlide))) {
+        if (lastSlide && !this.hasActionCue(this.collectSlideText(lastSlide)) && !metrics.visualFirstDeck) {
             score -= 5;
             issues.push('Last slide lacks a clear takeaway/next-step cue.');
             recommendations.push('Add a closing takeaway on the final slide.');
+        } else if (lastSlide && metrics.visualFirstDeck) {
+            evidence.push('Final-slide text cue check was skipped because the rendered deck is primarily visual.');
         }
 
         const boundedScore = this.clamp(this.round(score, 1), 0, 100);
@@ -597,25 +725,33 @@ export class EvaluatorService {
         const issues: string[] = [];
         const recommendations: string[] = [];
         let score = 100;
+        const textHeuristicLimited = this.shouldDownweightTextHeuristics(metrics);
 
         evidence.push(`Duplicate titles: ${metrics.duplicateTitleCount}.`);
         evidence.push(`Generic titles: ${metrics.genericTitleCount}.`);
         evidence.push(`Weak transitions: ${metrics.weakTransitionCount}.`);
+        if (metrics.visualFirstDeck) {
+            evidence.push('Rendered deck is image-first, so text-only consistency checks are partially relaxed.');
+        }
 
         if (metrics.duplicateTitleCount > 0) {
             score -= metrics.duplicateTitleCount * 4;
             issues.push('Duplicate titles hurt naming consistency.');
             recommendations.push('Rename duplicate titles with distinct wording.');
         }
-        if (metrics.genericTitleCount > 0) {
+        if (metrics.genericTitleCount > 0 && !textHeuristicLimited) {
             score -= metrics.genericTitleCount * 3;
             issues.push('Generic titles weaken style consistency.');
             recommendations.push('Use consistent domain terminology in titles.');
+        } else if (metrics.genericTitleCount > 0) {
+            evidence.push('Generic-title consistency penalty was relaxed because rendered text is not reliably extractable.');
         }
-        if (metrics.weakTransitionCount > 0) {
+        if (metrics.weakTransitionCount > 0 && !textHeuristicLimited) {
             score -= Math.min(16, metrics.weakTransitionCount * 3);
             issues.push('Some neighboring slides are weakly connected.');
             recommendations.push('Add stronger transitions between neighboring slides.');
+        } else if (metrics.weakTransitionCount > 0) {
+            evidence.push('Transition-consistency penalty was relaxed for the image-first rendered deck.');
         }
         if (metrics.redundantContentItemCount > 0) {
             score -= Math.min(12, metrics.redundantContentItemCount * 1.5);
@@ -623,14 +759,16 @@ export class EvaluatorService {
             recommendations.push('Trim repeated bullets and repeated summary text.');
         }
         if (metrics.dominantLayoutRatio > 0.92 && metrics.slideCount >= 8) {
-            score -= 7;
+            score -= metrics.visualFirstDeck ? 3 : 7;
             issues.push('Layout pattern is overly repetitive for a long deck.');
             recommendations.push('Introduce controlled layout variation.');
         }
-        if (Math.abs(metrics.summaryCoverage - metrics.promptCoverage) > 0.4 && metrics.slideCount >= 6) {
+        if (Math.abs(metrics.summaryCoverage - metrics.promptCoverage) > 0.4 && metrics.slideCount >= 6 && !metrics.visualFirstDeck) {
             score -= 6;
             issues.push('Planning completeness differs too much between text and image prompts.');
             recommendations.push('Align summary coverage and prompt coverage.');
+        } else if (Math.abs(metrics.summaryCoverage - metrics.promptCoverage) > 0.4 && metrics.visualFirstDeck) {
+            evidence.push('Summary/prompt completeness gap was tolerated because the rendered deck is image-first.');
         }
         if (metrics.fallbackImageCount > 0) {
             score -= Math.min(10, metrics.fallbackImageCount * 2);
@@ -649,8 +787,8 @@ export class EvaluatorService {
         }
         if (
             metrics.duplicateTitleCount === 0 &&
-            metrics.genericTitleCount === 0 &&
-            metrics.weakTransitionCount === 0 &&
+            (metrics.genericTitleCount === 0 || textHeuristicLimited) &&
+            (metrics.weakTransitionCount === 0 || textHeuristicLimited) &&
             metrics.redundantContentItemCount === 0 &&
             metrics.renderedMetaArtifactSlideCount === 0 &&
             metrics.renderedMixedLanguageSlideCount === 0
@@ -939,7 +1077,9 @@ export class EvaluatorService {
         consistency: QualityDimensionScore,
     ): string[] {
         const findings: string[] = [];
-        findings.push(`Image coverage ${(metrics.imageCoverage * 100).toFixed(1)}%, prompt coverage ${(metrics.promptCoverage * 100).toFixed(1)}%.`);
+        findings.push(
+            `Image coverage planned/rendered ${(metrics.imageCoverage * 100).toFixed(1)}% / ${(metrics.renderedImageCoverage * 100).toFixed(1)}%, prompt coverage ${(metrics.promptCoverage * 100).toFixed(1)}%.`,
+        );
         findings.push(`Summary coverage ${(metrics.summaryCoverage * 100).toFixed(1)}%, sparse slides ${metrics.sparseContentSlideCount} (severe ${metrics.severeSparseContentSlideCount}).`);
         findings.push(`Titles: duplicate ${metrics.duplicateTitleCount}, generic ${metrics.genericTitleCount}; weak transitions ${metrics.weakTransitionCount}.`);
         findings.push(`Scores -> Logic ${logic.score}, Layout ${layout.score}, Image ${image.score}, Richness ${richness.score}, Audience ${audience.score}, Consistency ${consistency.score}.`);
@@ -958,7 +1098,27 @@ export class EvaluatorService {
         if (metrics.renderedMixedLanguageSlideCount > 0) {
             findings.push(`${metrics.renderedMixedLanguageSlideCount} rendered slides contain mixed-language narration.`);
         }
+        if (metrics.visualFirstDeck) {
+            findings.push(
+                `Rendered deck is image-first: ${metrics.renderedSlideWithImageCount}/${metrics.renderedSlideCount} slides contain images and ${metrics.renderedUniqueImageCount} unique rendered image assets were detected.`,
+            );
+        }
         return findings;
+    }
+
+    private effectiveImageCoverage(metrics: QualityMetrics): number {
+        return Math.max(metrics.imageCoverage, metrics.renderedImageCoverage);
+    }
+
+    private renderedVisualDiversity(metrics: QualityMetrics): number {
+        if (metrics.renderedSlideWithImageCount === 0) {
+            return 0;
+        }
+        return metrics.renderedUniqueImageCount / metrics.renderedSlideWithImageCount;
+    }
+
+    private shouldDownweightTextHeuristics(metrics: QualityMetrics): boolean {
+        return metrics.visualFirstDeck && metrics.renderedTextCoverage <= 0.1 && metrics.avgTextLengthPerSlide < 20;
     }
 
     private collectNextActions(...dimensions: QualityDimensionScore[]): string[] {
