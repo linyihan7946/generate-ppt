@@ -13,6 +13,8 @@ import { PlannerService } from './services/planner.service';
 import { EvaluatorService } from './services/evaluator.service';
 import { DeckAudience, DeckFocus, DeckFormat, DeckLength, DeckStyle, DocumentData, PlannerMode } from './types';
 
+import { ChatService, ChatMessage } from './services/chat.service';
+
 dotenv.config();
 
 const app = express();
@@ -21,6 +23,7 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../public')));
+app.use('/output', express.static(path.join(__dirname, '../output')));
 
 // Set up storage for uploaded files
 const storage = multer.diskStorage({
@@ -43,6 +46,52 @@ const plannerService = new PlannerService();
 const pptService = new PPTService();
 const imageService = new ImageService();
 const evaluatorService = new EvaluatorService();
+const chatService = new ChatService();
+
+// 新增对话生成 PPT 接口
+app.post('/api/chat', async (req, res) => {
+    try {
+        const messages: ChatMessage[] = req.body.messages;
+        if (!messages || !Array.isArray(messages)) {
+            return res.status(400).json({ error: 'Invalid messages array.' });
+        }
+
+        console.log('Received chat request, messages count:', messages.length);
+        const chatResponse = await chatService.chatAndGenerate(messages);
+
+        let downloadUrl = undefined;
+
+        if (chatResponse.pptData) {
+            console.log('LLM generated PPT data, processing images and PPTX...');
+            
+            const enableAiImages = process.env.ENABLE_AI_IMAGES !== 'false';
+            const imageConcurrency = Number(process.env.IMAGE_CONCURRENCY || 2);
+            if (enableAiImages) {
+                await imageService.enrichSlidesWithGeneratedImages(chatResponse.pptData.slides, imageConcurrency);
+            }
+
+            const outputFilename = `presentation-chat-${Date.now()}.pptx`;
+            const outputDir = path.join(__dirname, '../output');
+            if (!fs.existsSync(outputDir)) {
+                fs.mkdirSync(outputDir, { recursive: true });
+            }
+            const outputPath = path.join(outputDir, outputFilename);
+            
+            await pptService.generate(chatResponse.pptData, outputPath);
+            
+            downloadUrl = `/output/${outputFilename}`;
+        }
+
+        res.json({
+            reply: chatResponse.reply,
+            downloadUrl: downloadUrl
+        });
+
+    } catch (error: any) {
+        console.error('Chat API Error:', error);
+        res.status(500).json({ error: error.message || 'An error occurred during chat.' });
+    }
+});
 
 function normalizePlannerMode(input?: string): PlannerMode | undefined {
     if (input === 'strict' || input === 'creative') {

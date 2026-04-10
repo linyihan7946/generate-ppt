@@ -1,66 +1,204 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Doc to PPT Generator</title>
+    <title>AI 智能 PPT 生成器</title>
     <style>
-        body { font-family: sans-serif; max-width: 600px; margin: 50px auto; text-align: center; }
-        .upload-area { border: 2px dashed #ccc; padding: 40px; border-radius: 10px; cursor: pointer; }
-        .upload-area:hover { border-color: #0088CC; }
-        #status { margin-top: 20px; color: #666; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; color: #333; }
+        h1 { text-align: center; color: #0F172A; }
+        
+        .tabs { display: flex; margin-bottom: 20px; border-bottom: 2px solid #E2E8F0; }
+        .tab { padding: 12px 24px; cursor: pointer; font-weight: bold; color: #64748B; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+        .tab.active { color: #0EA5E9; border-bottom-color: #0EA5E9; }
+        
+        .panel { display: none; }
+        .panel.active { display: block; }
+
+        /* Upload Styles */
+        .upload-area { border: 2px dashed #CBD5E1; padding: 60px; border-radius: 12px; cursor: pointer; text-align: center; background-color: #F8FAFC; transition: all 0.3s ease; }
+        .upload-area:hover { border-color: #0EA5E9; background-color: #F0F9FF; }
+        #status { margin-top: 20px; color: #64748B; text-align: center; }
+
+        /* Chat Styles */
+        .chat-container { border: 1px solid #E2E8F0; border-radius: 12px; height: 500px; display: flex; flex-direction: column; overflow: hidden; background: #fff; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
+        .chat-messages { flex: 1; overflow-y: auto; padding: 20px; background: #F8FAFC; }
+        .message { margin-bottom: 15px; max-width: 80%; line-height: 1.5; }
+        .message.system { margin-right: auto; background: #E0F2FE; color: #0369A1; padding: 12px 16px; border-radius: 12px 12px 12px 0; }
+        .message.user { margin-left: auto; background: #0EA5E9; color: white; padding: 12px 16px; border-radius: 12px 12px 0 12px; }
+        .chat-input-area { display: flex; padding: 15px; background: white; border-top: 1px solid #E2E8F0; }
+        .chat-input-area input { flex: 1; padding: 12px 16px; border: 1px solid #CBD5E1; border-radius: 8px; font-size: 15px; outline: none; }
+        .chat-input-area input:focus { border-color: #0EA5E9; }
+        .chat-input-area button { margin-left: 10px; padding: 12px 24px; background: #0EA5E9; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 15px; transition: background 0.3s ease; }
+        .chat-input-area button:hover { background: #0284C7; }
+        .chat-input-area button:disabled { background: #94A3B8; cursor: not-allowed; }
+        
+        .download-btn { display: inline-block; margin-top: 10px; padding: 10px 20px; background: #10B981; color: white; text-decoration: none; border-radius: 6px; font-weight: bold; }
+        .download-btn:hover { background: #059669; }
     </style>
 </head>
 <body>
-    <h1>Document to PPT Generator</h1>
-    <p>Upload .md, .docx, or .pdf to generate a presentation.</p>
+    <h1>AI 智能 PPT 生成器</h1>
     
-    <div class="upload-area" id="drop-zone">
-        <p>Click or drag file here</p>
-        <input type="file" id="file-input" style="display: none;" accept=".md,.docx,.pdf">
+    <div class="tabs">
+        <div class="tab active" onclick="switchTab('chat')">AI 对话生成 (New ✨)</div>
+        <div class="tab" onclick="switchTab('upload')">文档上传生成</div>
     </div>
 
-    <div id="status"></div>
+    <!-- Chat Panel -->
+    <div id="chat-panel" class="panel active">
+        <div class="chat-container">
+            <div class="chat-messages" id="chat-messages">
+                <div class="message system">您好！我是 AI 演示文稿专家。为了给您生成最合适的 PPT，能先告诉我这个 PPT 的主要用途是什么吗？（比如：工作汇报、商业路演、团队培训等）</div>
+            </div>
+            <div class="chat-input-area">
+                <input type="text" id="chat-input" placeholder="输入您的回答..." onkeypress="handleKeyPress(event)">
+                <button id="send-btn" onclick="sendMessage()">发送</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Upload Panel -->
+    <div id="upload-panel" class="panel">
+        <p style="text-align: center; color: #64748B;">上传 .md, .docx, 或 .pdf 文件，系统将自动提炼大纲并生成排版精美的 PPT。</p>
+        <div class="upload-area" id="drop-zone">
+            <h3 style="margin-bottom: 10px; color: #0F172A;">点击或拖拽文件到这里</h3>
+            <p style="margin: 0; font-size: 14px;">支持 Markdown, Word, PDF 格式</p>
+            <input type="file" id="file-input" style="display: none;" accept=".md,.docx,.pdf">
+        </div>
+        <div id="status"></div>
+    </div>
 
     <script>
+        // --- Tab Switching Logic ---
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+            
+            if (tabId === 'chat') {
+                document.querySelectorAll('.tab')[0].classList.add('active');
+                document.getElementById('chat-panel').classList.add('active');
+            } else {
+                document.querySelectorAll('.tab')[1].classList.add('active');
+                document.getElementById('upload-panel').classList.add('active');
+            }
+        }
+
+        // --- Upload Logic ---
         const dropZone = document.getElementById('drop-zone');
         const fileInput = document.getElementById('file-input');
         const status = document.getElementById('status');
 
         dropZone.onclick = () => fileInput.click();
+        dropZone.ondragover = (e) => { e.preventDefault(); dropZone.style.borderColor = '#0EA5E9'; };
+        dropZone.ondragleave = (e) => { e.preventDefault(); dropZone.style.borderColor = '#CBD5E1'; };
+        dropZone.ondrop = (e) => { 
+            e.preventDefault(); 
+            dropZone.style.borderColor = '#CBD5E1';
+            if (e.dataTransfer.files.length) {
+                handleFileUpload(e.dataTransfer.files[0]);
+            }
+        };
 
-        fileInput.onchange = async (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
+        fileInput.onchange = (e) => {
+            if (e.target.files.length) handleFileUpload(e.target.files[0]);
+        };
 
-            status.innerText = 'Processing... Please wait.';
-            
+        async function handleFileUpload(file) {
+            status.innerText = '正在使用大模型提炼大纲与生成配图，请耐心等待（约需30-60秒）...';
             const formData = new FormData();
             formData.append('file', file);
+            formData.append('plannerMode', 'creative'); // 开启智能重写模式
 
             try {
-                const response = await fetch('/generate-ppt', {
-                    method: 'POST',
-                    body: formData
-                });
-
+                const response = await fetch('/generate-ppt', { method: 'POST', body: formData });
                 if (response.ok) {
                     const blob = await response.blob();
                     const url = window.URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = file.name.split('.')[0] + '.pptx';
+                    a.download = file.name.split('.')[0] + '-AI生成.pptx';
                     document.body.appendChild(a);
                     a.click();
                     a.remove();
-                    status.innerText = 'PPT generated successfully!';
+                    status.innerHTML = '<span style="color: #10B981; font-weight: bold;">✅ PPT 生成成功并开始下载！</span>';
                 } else {
-                    status.innerText = 'Error generating PPT: ' + (await response.text());
+                    status.innerHTML = '<span style="color: #EF4444;">❌ 生成失败: ' + (await response.text()) + '</span>';
                 }
             } catch (err) {
-                status.innerText = 'Error: ' + err.message;
+                status.innerHTML = '<span style="color: #EF4444;">❌ 错误: ' + err.message + '</span>';
             }
-        };
+        }
+
+        // --- Chat Logic ---
+        let chatHistory = [];
+        const messagesContainer = document.getElementById('chat-messages');
+        const chatInput = document.getElementById('chat-input');
+        const sendBtn = document.getElementById('send-btn');
+
+        function appendMessage(role, content, downloadUrl = null) {
+            const div = document.createElement('div');
+            div.className = `message ${role}`;
+            div.innerText = content;
+            
+            if (downloadUrl) {
+                div.innerHTML += `<br><br><a href="${downloadUrl}" class="download-btn" target="_blank">📥 点击下载生成的 PPT</a>`;
+            }
+            
+            messagesContainer.appendChild(div);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        function handleKeyPress(e) {
+            if (e.key === 'Enter') sendMessage();
+        }
+
+        async function sendMessage() {
+            const text = chatInput.value.trim();
+            if (!text) return;
+
+            // 显示用户的消息
+            appendMessage('user', text);
+            chatHistory.push({ role: 'user', content: text });
+            
+            chatInput.value = '';
+            chatInput.disabled = true;
+            sendBtn.disabled = true;
+            
+            // 显示思考中
+            const loadingId = 'loading-' + Date.now();
+            const loadingDiv = document.createElement('div');
+            loadingDiv.className = 'message system';
+            loadingDiv.id = loadingId;
+            loadingDiv.innerText = '正在思考... (如果开始生成 PPT 可能需要 30-60 秒)';
+            messagesContainer.appendChild(loadingDiv);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+
+            try {
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ messages: chatHistory })
+                });
+                
+                const data = await response.json();
+                document.getElementById(loadingId).remove();
+
+                if (response.ok) {
+                    appendMessage('system', data.reply, data.downloadUrl);
+                    chatHistory.push({ role: 'assistant', content: data.reply });
+                } else {
+                    appendMessage('system', '❌ 请求失败: ' + (data.error || '未知错误'));
+                }
+            } catch (err) {
+                document.getElementById(loadingId).remove();
+                appendMessage('system', '❌ 网络错误: ' + err.message);
+            } finally {
+                chatInput.disabled = false;
+                sendBtn.disabled = false;
+                chatInput.focus();
+            }
+        }
     </script>
 </body>
 </html>
