@@ -16,8 +16,8 @@ export class ChatService {
     private baseUrl: string;
 
     constructor() {
-        this.apiKey = process.env.IMAGE_API_KEY; // 复用现有的 API Key
-        this.baseUrl = process.env.IMAGE_API_BASE_URL || 'https://www.aigenimage.cn';
+        this.apiKey = process.env.PLANNER_AUTH_TOKEN || process.env.IMAGE_API_KEY; 
+        this.baseUrl = process.env.PLANNER_API_BASE_URL || process.env.IMAGE_API_BASE_URL || 'https://www.aigenimage.cn';
     }
 
     async chatAndGenerate(messages: ChatMessage[]): Promise<ChatResponse> {
@@ -60,14 +60,16 @@ JSON 结构必须完全符合以下格式：
         };
 
         const payloadMessages = [systemPrompt, ...messages];
+        const promptString = payloadMessages.map(m => `${m.role.toUpperCase()}:\n${m.content}`).join('\n\n') + '\n\nASSISTANT:\n';
 
         try {
             const response = await axios.post(
-                `${this.baseUrl}/v1/chat/completions`,
+                `${this.baseUrl}/api/llm/direct`,
                 {
-                    model: process.env.LLM_MODEL || 'gemini-1.5-pro', // 默认使用较强的大模型
-                    messages: payloadMessages,
+                    model: process.env.PLANNER_MODEL || 'gemini-3.1-pro-preview',
+                    prompt: promptString,
                     temperature: 0.7,
+                    stream: false
                 },
                 {
                     headers: {
@@ -75,10 +77,24 @@ JSON 结构必须完全符合以下格式：
                         ...(this.apiKey && { Authorization: `Bearer ${this.apiKey}` }),
                     },
                     timeout: 60000,
+                    validateStatus: () => true,
                 }
             );
 
-            const replyContent = response.data.choices[0].message.content;
+            if (response.status !== 200 || response.data?.success === false) {
+                console.error(`LLM API failed: status=${response.status}, message=${response.data?.message || 'unknown'}`);
+                throw new Error('API return error');
+            }
+
+            let replyContent = '';
+            const payload = response.data;
+            if (typeof payload.data === 'string') replyContent = payload.data;
+            else if (payload.data?.choices?.[0]?.text) replyContent = payload.data.choices[0].text;
+            else if (payload.data?.choices?.[0]?.message?.content) replyContent = payload.data.choices[0].message.content;
+            else if (payload.data?.reply) replyContent = String(payload.data.reply);
+            else if (payload.data?.text) replyContent = String(payload.data.text);
+            else if (payload.data?.content) replyContent = String(payload.data.content);
+            else replyContent = JSON.stringify(payload);
             
             // 尝试从回复中解析 JSON
             const jsonMatch = replyContent.match(/```json\n([\s\S]*?)\n```/);
