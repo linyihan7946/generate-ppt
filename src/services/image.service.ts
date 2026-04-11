@@ -69,7 +69,6 @@ export class ImageService {
                 `${this.baseUrl}/api/image/direct-edit`,
                 {
                     prompt,
-                    images: [],
                     model: 'gemini-3.1-flash-image-preview',
                     aspect_ratio: '16:9',
                     resolution: '2K',
