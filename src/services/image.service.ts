@@ -14,6 +14,7 @@ export class ImageService {
 
     async enrichSlidesWithGeneratedImages(slides: SlideContent[], concurrency = 2): Promise<void> {
         const jobs = slides.map((slide) => async () => {
+            if (!slide.images) slide.images = [];
             if (slide.images.length > 0) return;
 
             const prompt = this.buildPrompt(slide);

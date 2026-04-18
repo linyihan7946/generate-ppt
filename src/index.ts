@@ -49,15 +49,76 @@ const evaluatorService = new EvaluatorService();
 const chatService = new ChatService();
 
 // 新增对话生成 PPT 接口
-app.post('/api/chat', async (req, res) => {
+app.post('/api/chat', upload.array('files', 5), async (req: any, res: any) => {
     try {
-        const messages: ChatMessage[] = req.body.messages;
-        if (!messages || !Array.isArray(messages)) {
-            return res.status(400).json({ error: 'Invalid messages array.' });
+        console.log(' req.files:', req.files);
+        console.log(' req.body:', JSON.stringify(req.body).substring(0, 200));
+        
+        const files: Express.Multer.File[] = req.files || [];
+        const text = req.body.text || '';
+        const messagesRaw = req.body.messages;
+        
+        let messages: ChatMessage[] = [];
+        if (messagesRaw) {
+            try {
+                messages = JSON.parse(messagesRaw);
+            } catch {
+                messages = [];
+            }
         }
 
-        console.log('Received chat request, messages count:', messages.length);
-        const chatResponse = await chatService.chatAndGenerate(messages);
+        console.log('Received chat request, messages count:', messages.length, ', files count:', files?.length || 0);
+
+        let docContent = '';
+        
+        if (files && files.length > 0) {
+            console.log('Processing uploaded files...');
+            const parsedDocs: DocumentData[] = [];
+            
+            for (const file of files) {
+                const ext = path.extname(file.originalname).toLowerCase();
+                console.log(`Parsing file: ${file.originalname}, ext: ${ext}`);
+                
+                try {
+                    if (ext === '.md') {
+                        const doc = await parserService.parseMarkdown(file.path);
+                        parsedDocs.push(doc);
+                    } else if (ext === '.docx') {
+                        const doc = await parserService.parseDocx(file.path);
+                        parsedDocs.push(doc);
+                    } else if (ext === '.pdf') {
+                        const doc = await parserService.parsePdf(file.path);
+                        parsedDocs.push(doc);
+                    } else if (['.png', '.jpg', '.jpeg'].includes(ext)) {
+                        const base64 = fs.readFileSync(file.path).toString('base64');
+                        const mimeType = ext === '.png' ? 'image/png' : 'image/jpeg';
+                        docContent += `\n\n[用户上传了图片: ${file.originalname}]\n图片数据: data:${mimeType};base64,${base64.substring(0, 100)}...`;
+                    }
+                    
+                    // Clean up temp file
+                    fs.unlinkSync(file.path);
+                } catch (parseErr) {
+                    console.error(`Error parsing file ${file.originalname}:`, parseErr);
+                }
+            }
+            
+            if (parsedDocs.length > 0) {
+                const primaryDoc = parsedDocs[0];
+                docContent = `\n\n=== 用户上传的文档内容 ===\n文档标题: ${primaryDoc.title}\n`;
+                parsedDocs.forEach((doc, idx) => {
+                    if (idx > 0) docContent += `\n--- 文档 ${idx + 1} ---\n`;
+                    docContent += `标题: ${doc.title}\n`;
+                    doc.slides.forEach((slide, slideIdx) => {
+                        docContent += `\n## ${slide.title}\n`;
+                        if (slide.bullets.length > 0) {
+                            docContent += slide.bullets.map(b => `- ${b}`).join('\n') + '\n';
+                        }
+                    });
+                });
+            }
+        }
+
+        const chatResponse = await chatService.chatAndGenerate(messages, text, docContent);
 
         let downloadUrl = undefined;
 

@@ -26,15 +26,35 @@
         .message { margin-bottom: 15px; max-width: 80%; line-height: 1.5; }
         .message.system { margin-right: auto; background: #E0F2FE; color: #0369A1; padding: 12px 16px; border-radius: 12px 12px 12px 0; }
         .message.user { margin-left: auto; background: #0EA5E9; color: white; padding: 12px 16px; border-radius: 12px 12px 0 12px; }
-        .chat-input-area { display: flex; padding: 15px; background: white; border-top: 1px solid #E2E8F0; }
-        .chat-input-area input { flex: 1; padding: 12px 16px; border: 1px solid #CBD5E1; border-radius: 8px; font-size: 15px; outline: none; }
-        .chat-input-area input:focus { border-color: #0EA5E9; }
-        .chat-input-area button { margin-left: 10px; padding: 12px 24px; background: #0EA5E9; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 15px; transition: background 0.3s ease; }
-        .chat-input-area button:hover { background: #0284C7; }
-        .chat-input-area button:disabled { background: #94A3B8; cursor: not-allowed; }
+        
+        .chat-input-area { display: flex; padding: 15px; background: white; border-top: 1px solid #E2E8F0; align-items: center; gap: 10px; }
+        .chat-input-area input[type="text"] { flex: 1; padding: 12px 16px; border: 1px solid #CBD5E1; border-radius: 8px; font-size: 15px; outline: none; }
+        .chat-input-area input[type="text"]:focus { border-color: #0EA5E9; }
+        
+        .chat-input-wrapper { flex: 1; display: flex; flex-direction: column; gap: 8px; }
+        
+        .attached-file { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #F0F9FF; border: 1px solid #BAE6FD; border-radius: 8px; font-size: 13px; color: #0369A1; }
+        .attached-file .file-icon { font-size: 16px; }
+        .attached-file .file-name { flex: 1; }
+        .attached-file .remove-file { cursor: pointer; color: #EF4444; font-weight: bold; }
+        .attached-file .remove-file:hover { color: #DC2626; }
+        
+        .btn { padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 15px; transition: all 0.3s ease; }
+        .btn-primary { background: #0EA5E9; color: white; }
+        .btn-primary:hover { background: #0284C7; }
+        .btn-primary:disabled { background: #94A3B8; cursor: not-allowed; }
+        .btn-icon { padding: 10px 14px; background: #F1F5F9; color: #64748B; }
+        .btn-icon:hover { background: #E2E8F0; color: #0EA5E9; }
+        
+        .input-row { display: flex; gap: 8px; align-items: center; }
         
         .download-btn { display: inline-block; margin-top: 10px; padding: 10px 20px; background: #10B981; color: white; text-decoration: none; border-radius: 6px; font-weight: bold; }
         .download-btn:hover { background: #059669; }
+        
+        .file-list { padding: 8px 12px; background: #F8FAFC; border-top: 1px solid #E2E8F0; display: flex; flex-wrap: wrap; gap: 8px; }
+        .file-chip { display: flex; align-items: center; gap: 6px; padding: 6px 12px; background: #E0F2FE; border-radius: 20px; font-size: 13px; color: #0369A1; }
+        .file-chip .remove { cursor: pointer; font-weight: bold; color: #EF4444; }
+        .file-chip .remove:hover { color: #DC2626; }
     </style>
 </head>
 <body>
@@ -49,11 +69,20 @@
     <div id="chat-panel" class="panel active">
         <div class="chat-container">
             <div class="chat-messages" id="chat-messages">
-                <div class="message system">您好！我是 AI 演示文稿专家。为了给您生成最合适的 PPT，能先告诉我这个 PPT 的主要用途是什么吗？（比如：工作汇报、商业路演、团队培训等）</div>
+                <div class="message system">您好！我是 AI 演示文稿专家。为了给您生成最合适的 PPT，可以直接上传您的文档（支持 .docx, .pdf, .md, .png, .jpg 格式），或者告诉我这个 PPT 的主要用途是什么？</div>
             </div>
             <div class="chat-input-area">
-                <input type="text" id="chat-input" placeholder="输入您的回答..." onkeypress="handleKeyPress(event)">
-                <button id="send-btn" onclick="sendMessage()">发送</button>
+                <div class="chat-input-wrapper">
+                    <div id="file-list" class="file-list" style="display: none;"></div>
+                    <div class="input-row">
+                        <input type="text" id="chat-input" placeholder="输入您的回答或上传文档..." onkeypress="handleKeyPress(event)">
+                        <label class="btn btn-icon" title="添加附件">
+                            <input type="file" id="chat-file-input" style="display: none;" accept=".docx,.pdf,.md,.png,.jpg,.jpeg" onchange="handleFileSelect(event)">
+                            📎
+                        </label>
+                        <button id="send-btn" class="btn btn-primary" onclick="sendMessage()">发送</button>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -108,7 +137,7 @@
             status.innerText = '正在使用大模型提炼大纲与生成配图，请耐心等待（约需30-60秒）...';
             const formData = new FormData();
             formData.append('file', file);
-            formData.append('plannerMode', 'creative'); // 开启智能重写模式
+            formData.append('plannerMode', 'creative');
 
             try {
                 const response = await fetch('/generate-ppt', { method: 'POST', body: formData });
@@ -132,14 +161,69 @@
 
         // --- Chat Logic ---
         let chatHistory = [];
+        let attachedFiles = [];
         const messagesContainer = document.getElementById('chat-messages');
         const chatInput = document.getElementById('chat-input');
         const sendBtn = document.getElementById('send-btn');
+        const fileListEl = document.getElementById('file-list');
+        const chatFileInput = document.getElementById('chat-file-input');
+
+        function getFileIcon(filename) {
+            const ext = filename.split('.').pop().toLowerCase();
+            if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext)) return '🖼️';
+            if (['docx', 'doc'].includes(ext)) return '📄';
+            if (['pdf'].includes(ext)) return '📕';
+            if (['md', 'markdown'].includes(ext)) return '📝';
+            return '📎';
+        }
+
+        function renderFileList() {
+            if (attachedFiles.length === 0) {
+                fileListEl.style.display = 'none';
+                return;
+            }
+            fileListEl.style.display = 'flex';
+            fileListEl.innerHTML = attachedFiles.map((file, idx) => `
+                <div class="file-chip">
+                    <span>${getFileIcon(file.name)}</span>
+                    <span>${file.name}</span>
+                    <span class="remove" onclick="removeFile(${idx})">✕</span>
+                </div>
+            `).join('');
+        }
+
+        function removeFile(idx) {
+            attachedFiles.splice(idx, 1);
+            renderFileList();
+        }
+
+        window.removeFile = removeFile;
+
+        function handleFileSelect(e) {
+            const files = Array.from(e.target.files);
+            files.forEach(file => {
+                if (!attachedFiles.find(f => f.name === file.name)) {
+                    attachedFiles.push(file);
+                }
+            });
+            renderFileList();
+            e.target.value = '';
+        }
+
+        window.handleFileSelect = handleFileSelect;
 
         function appendMessage(role, content, downloadUrl = null) {
             const div = document.createElement('div');
             div.className = `message ${role}`;
-            div.innerText = content;
+            
+            if (role === 'user' && attachedFiles.length > 0) {
+                div.innerHTML = `<div style="margin-bottom: 8px;">${content}</div>`;
+                div.innerHTML += attachedFiles.map(f => 
+                    `<div style="font-size: 12px; opacity: 0.8;">📎 ${f.name}</div>`
+                ).join('');
+            } else {
+                div.innerText = content;
+            }
             
             if (downloadUrl) {
                 div.innerHTML += `<br><br><a href="${downloadUrl}" class="download-btn" target="_blank">📥 点击下载生成的 PPT</a>`;
@@ -150,22 +234,39 @@
         }
 
         function handleKeyPress(e) {
-            if (e.key === 'Enter') sendMessage();
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
         }
+
+        window.handleKeyPress = handleKeyPress;
 
         async function sendMessage() {
             const text = chatInput.value.trim();
-            if (!text) return;
+            if (!text && attachedFiles.length === 0) return;
 
-            // 显示用户的消息
-            appendMessage('user', text);
-            chatHistory.push({ role: 'user', content: text });
+            const formData = new FormData();
+            
+            if (text) {
+                formData.append('text', text);
+            }
+            
+            attachedFiles.forEach(file => {
+                formData.append('files', file);
+            });
+            
+            formData.append('messages', JSON.stringify(chatHistory));
+
+            appendMessage('user', text || '(发送了文件)');
+            chatHistory.push({ role: 'user', content: text || '(发送了文件)' });
             
             chatInput.value = '';
             chatInput.disabled = true;
             sendBtn.disabled = true;
+            attachedFiles = [];
+            renderFileList();
             
-            // 显示思考中
             const loadingId = 'loading-' + Date.now();
             const loadingDiv = document.createElement('div');
             loadingDiv.className = 'message system';
@@ -177,8 +278,7 @@
             try {
                 const response = await fetch('/api/chat', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ messages: chatHistory })
+                    body: formData
                 });
                 
                 const data = await response.json();
@@ -199,6 +299,8 @@
                 chatInput.focus();
             }
         }
+
+        window.sendMessage = sendMessage;
     </script>
 </body>
 </html>
