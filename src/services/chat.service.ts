@@ -184,12 +184,14 @@ export class ChatService {
       "title": "幻灯片页面标题",
       "slideRole": "content",
       "keyMessage": "这一页的核心观点",
-      "bullets": ["要点1：详细说明...", "要点2：详细说明...", "要点3：详细说明..."]
+      "bullets": ["要点1：详细说明...", "要点2：详细说明...", "要点3：详细说明..."],
+      "imagePrompt": "用英文描述这一页需要的配图内容，要具体、与本页主题强相关，例如：A futuristic microprocessor chip glowing with blue circuits on a dark motherboard"
     }
   ]
 }
 \`\`\`
-slideRole 可以是 "agenda"(目录), "content"(正文), "comparison"(对比), "summary"(总结), "next_step"(下一步计划)。`;
+slideRole 可以是 "agenda"(目录), "content"(正文), "comparison"(对比), "summary"(总结), "next_step"(下一步计划)。
+imagePrompt 必须用英文撰写，具体描述与该页主题强相关的配图画面，避免通用描述，需要体现该页独特的内容场景。`;
 
         const docSection = docContent ? `\n\n=== 用户上传的文档内容 ===\n${docContent}\n===\n` : '';
 
@@ -232,13 +234,15 @@ ${docSection}
       "title": "第1页标题",
       "slideRole": "agenda",
       "keyMessage": "核心观点",
-      "bullets": ["要点1", "要点2", "要点3"]
+      "bullets": ["要点1", "要点2", "要点3"],
+      "imagePrompt": "English description of a scene closely related to this slide's topic"
     }
   ]
 }
 \`\`\`
 
 slideRole 可选值：agenda(目录)、content(正文)、comparison(对比)、summary(总结)、next_step(下一步)。
+imagePrompt 必须用英文，描述与该页内容直接相关的具体画面场景。
 
 规则：
 - 必须输出 \`\`\`json 代码块
@@ -261,7 +265,8 @@ ${jsonSpec}
 - 必须输出 \`\`\`json 代码块
 - JSON 内容要基于之前确认的大纲，bullets 内容要丰满专业
 - 回复开头可以简短说一句"正在为您生成PPT..."之类的话
-- 发挥你的专业知识，充实每一页的 bullets 内容`;
+- 发挥你的专业知识，充实每一页的 bullets 内容
+- 每一页都必须包含 imagePrompt 字段，用英文描述与该页内容密切相关的配图场景，要具体生动，避免抽象通用`;
     }
 
     private parseResponse(replyContent: string, phase: string): ChatResponse {
@@ -314,6 +319,7 @@ ${jsonSpec}
                         ...slide,
                         images: slide.images || [],
                         bullets: slide.bullets || [],
+                        imagePrompt: slide.imagePrompt || '',
                     }));
                 }
                 const finalReply = processedReply.replace(/```json\n[\s\S]*?\n```/, '').trim()

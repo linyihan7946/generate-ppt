@@ -15,8 +15,9 @@ export class SlideRendererService {
         const slides = data.slides;
         const pages: string[] = [];
 
-        // 封面
-        pages.push(this.renderTitleSlide(data));
+        // 封面 — 用第一张内容图作背景装饰
+        const coverImage = slides.find(s => s.images && s.images.length > 0)?.images?.[0] || '';
+        pages.push(this.renderTitleSlide(data, coverImage));
 
         // 内容页
         slides.forEach((slide, idx) => {
@@ -65,6 +66,15 @@ export class SlideRendererService {
     position: relative;
     overflow: hidden;
   }
+  .slide-bg-image {
+    position: absolute; inset: 0; z-index: 0;
+    overflow: hidden;
+  }
+  .slide-bg-image img {
+    width: 100%; height: 100%; object-fit: cover;
+    opacity: 0.12;
+    filter: blur(2px);
+  }
   ${extraStyles}
 </style>
 </head>
@@ -81,15 +91,20 @@ export class SlideRendererService {
     }
 
     // ======== Title Slide (封面) ========
-    private renderTitleSlide(data: DocumentData): string {
+    private renderTitleSlide(data: DocumentData, coverImage: string): string {
         const brief = data.brief;
         const goal = brief?.deckGoal || '';
         const style = brief?.style || '';
         const audience = brief?.audience || '';
 
+        const imgHtml = coverImage
+            ? `<div class="title-cover-img"><img src="${coverImage}" alt="" /></div>`
+            : '';
+
         const body = `
 <div class="slide title-slide">
   <div class="title-bg">
+    ${imgHtml}
     <div class="title-pattern"></div>
     <div class="title-gradient"></div>
   </div>
@@ -112,6 +127,16 @@ export class SlideRendererService {
         const styles = `
 .title-slide { background: #0a0f1e; color: #fff; }
 .title-bg { position: absolute; inset: 0; }
+.title-cover-img {
+  position: absolute; right: 0; top: 0;
+  width: 55%; height: 100%;
+  overflow: hidden;
+  mask-image: linear-gradient(to left, rgba(0,0,0,0.45) 0%, transparent 85%);
+  -webkit-mask-image: linear-gradient(to left, rgba(0,0,0,0.45) 0%, transparent 85%);
+}
+.title-cover-img img {
+  width: 100%; height: 100%; object-fit: cover;
+}
 .title-pattern {
   position: absolute; inset: 0;
   background-image:
@@ -286,6 +311,7 @@ export class SlideRendererService {
     // ======== Agenda Slide ========
     private renderAgendaSlide(slide: SlideContent, brief?: DeckBrief): string {
         const items = (brief?.chapterTitles?.length ? brief.chapterTitles : slide.bullets).slice(0, 8);
+        const bgImage = slide.images && slide.images.length > 0 ? slide.images[0] : '';
 
         const itemsHtml = items.map((item, i) => `
       <div class="agenda-item">
@@ -295,6 +321,7 @@ export class SlideRendererService {
 
         const body = `
 <div class="slide agenda-slide">
+  ${bgImage ? `<div class="slide-bg-image"><img src="${bgImage}" alt="" /></div>` : ''}
   <div class="agenda-bg"></div>
   <div class="agenda-content">
     <div class="agenda-header">
@@ -354,6 +381,7 @@ export class SlideRendererService {
         const mid = Math.ceil(bullets.length / 2);
         const left = bullets.slice(0, mid);
         const right = bullets.slice(mid);
+        const bgImage = slide.images && slide.images.length > 0 ? slide.images[0] : '';
 
         const renderCol = (items: string[], color: string) => items.map((b, i) => `
       <div class="cmp-item">
@@ -363,6 +391,7 @@ export class SlideRendererService {
 
         const body = `
 <div class="slide comparison-slide">
+  ${bgImage ? `<div class="slide-bg-image slide-bg-image--light"><img src="${bgImage}" alt="" /></div>` : ''}
   <div class="cmp-header">
     <h2>${this.escapeHtml(slide.title)}</h2>
     ${slide.keyMessage ? `<p class="cmp-keymsg">${this.escapeHtml(slide.keyMessage)}</p>` : ''}
@@ -381,11 +410,12 @@ export class SlideRendererService {
 </div>`;
 
         const styles = `
-.comparison-slide { background: #fafbfe; color: #1a1e2e; padding: 70px 80px; }
-.cmp-header { margin-bottom: 40px; }
+.comparison-slide { background: #fafbfe; color: #1a1e2e; padding: 70px 80px; position: relative; }
+.slide-bg-image--light img { opacity: 0.06; filter: blur(4px) saturate(0.5); }
+.cmp-header { margin-bottom: 40px; position: relative; z-index: 2; }
 .cmp-header h2 { font-size: 46px; font-weight: 800; }
 .cmp-keymsg { font-size: 22px; color: #64748b; margin-top: 10px; }
-.cmp-columns { display: flex; gap: 0; flex: 1; }
+.cmp-columns { display: flex; gap: 0; flex: 1; position: relative; z-index: 2; }
 .cmp-col { flex: 1; padding: 30px; }
 .cmp-col-title {
   font-size: 26px; font-weight: 800; margin-bottom: 24px;
@@ -404,6 +434,7 @@ export class SlideRendererService {
     // ======== Timeline Slide ========
     private renderTimelineSlide(slide: SlideContent): string {
         const bullets = slide.bullets || [];
+        const bgImage = slide.images && slide.images.length > 0 ? slide.images[0] : '';
 
         const itemsHtml = bullets.map((b, i) => `
       <div class="tl-item">
@@ -417,6 +448,7 @@ export class SlideRendererService {
 
         const body = `
 <div class="slide timeline-slide">
+  ${bgImage ? `<div class="slide-bg-image"><img src="${bgImage}" alt="" /></div>` : ''}
   <div class="tl-header">
     <h2>${this.escapeHtml(slide.title)}</h2>
   </div>
@@ -424,9 +456,10 @@ export class SlideRendererService {
 </div>`;
 
         const styles = `
-.timeline-slide { background: #0f172a; color: #fff; padding: 70px 80px; }
+.timeline-slide { background: #0f172a; color: #fff; padding: 70px 80px; position: relative; }
+.tl-header { position: relative; z-index: 2; }
 .tl-header h2 { font-size: 46px; font-weight: 800; margin-bottom: 50px; }
-.tl-track { display: flex; gap: 24px; align-items: flex-start; overflow: hidden; }
+.tl-track { display: flex; gap: 24px; align-items: flex-start; overflow: hidden; position: relative; z-index: 2; }
 .tl-item { flex: 1; display: flex; flex-direction: column; align-items: center; position: relative; }
 .tl-dot {
   width: 16px; height: 16px; border-radius: 50%;
@@ -458,6 +491,7 @@ export class SlideRendererService {
     private renderSummarySlide(slide: SlideContent, role: string): string {
         const bullets = slide.bullets || [];
         const isSummary = role === 'summary';
+        const bgImage = slide.images && slide.images.length > 0 ? slide.images[0] : '';
 
         const itemsHtml = bullets.map((b, i) => `
       <div class="sum-item">
@@ -467,6 +501,7 @@ export class SlideRendererService {
 
         const body = `
 <div class="slide summary-slide">
+  ${bgImage ? `<div class="slide-bg-image"><img src="${bgImage}" alt="" /></div>` : ''}
   <div class="sum-bg"></div>
   <div class="sum-content">
     <div class="sum-badge">${isSummary ? 'SUMMARY' : 'NEXT STEPS'}</div>

@@ -140,6 +140,12 @@ app.post('/api/chat', upload.array('files', 5), async (req: any, res: any) => {
             
             if (useHtmlMode) {
                 console.log('Using HTML→PNG→PPT rendering pipeline...');
+                const enableAiImages = process.env.ENABLE_AI_IMAGES !== 'false';
+                const imageConcurrency = Number(process.env.IMAGE_CONCURRENCY || 2);
+                if (enableAiImages) {
+                    console.log('Generating AI images for HTML slides...');
+                    await imageService.enrichSlidesWithGeneratedImages(chatResponse.pptData.slides, imageConcurrency);
+                }
                 await pptImageService.generate(chatResponse.pptData, outputPath);
             } else {
                 console.log('Using legacy pptxgenjs rendering pipeline...');

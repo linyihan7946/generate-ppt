@@ -156,9 +156,14 @@ export class ImageService {
     }
 
     private buildPrompt(slide: SlideContent): string {
+        // 优先使用 LLM 为该页生成的 imagePrompt（更精准、贴合内容）
+        if (slide.imagePrompt && slide.imagePrompt.trim().length > 10) {
+            return `${slide.imagePrompt.trim()} Minimalist style, high quality, 4k resolution, no text overlay.`;
+        }
+
+        // 兜底：根据标题和要点自动拼接 prompt
         const cleanTitle = slide.title.replace(/\(Cont\..*\)/, '');
         const context = slide.breadcrumb ? `Context: ${slide.breadcrumb}.` : '';
-        // Clean up bullets to remove potential sensitive words or complex characters
         const cleanedBullets = slide.bullets.slice(0, 2).map(b => b.replace(/[^\w\s\u4e00-\u9fa5,.，。]/g, ''));
         const keyPoints = cleanedBullets.join(', ');
 
