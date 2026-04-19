@@ -129,21 +129,21 @@ export class SlideRendererService {
 .title-badge {
   display: inline-block;
   padding: 6px 20px;
-  font-size: 14px; font-weight: 700; letter-spacing: 3px;
+  font-size: 18px; font-weight: 700; letter-spacing: 3px;
   color: #0ea5e9;
   border: 2px solid rgba(14,165,233,0.4);
   border-radius: 30px;
   margin-bottom: 36px;
 }
 .title-main {
-  font-size: 64px; font-weight: 900; line-height: 1.15;
+  font-size: 76px; font-weight: 900; line-height: 1.15;
   max-width: 1100px;
   background: linear-gradient(135deg, #fff 0%, #93c5fd 100%);
   -webkit-background-clip: text; -webkit-text-fill-color: transparent;
   margin-bottom: 28px;
 }
 .title-goal {
-  font-size: 24px; color: rgba(255,255,255,0.7);
+  font-size: 30px; color: rgba(255,255,255,0.7);
   max-width: 900px; line-height: 1.5;
   margin-bottom: 40px;
 }
@@ -154,9 +154,9 @@ export class SlideRendererService {
   background: rgba(255,255,255,0.06);
   border: 1px solid rgba(255,255,255,0.1);
   border-radius: 8px;
-  font-size: 16px; color: rgba(255,255,255,0.6);
+  font-size: 20px; color: rgba(255,255,255,0.6);
 }
-.meta-icon { font-size: 18px; }
+.meta-icon { font-size: 22px; }
 .title-decoration { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
 .deco-circle {
   position: absolute; border-radius: 50%;
@@ -223,7 +223,7 @@ export class SlideRendererService {
 .topbar-accent { height: 100%; width: 30%; border-radius: 0 0 4px 0; }
 .page-num {
   position: absolute; top: 20px; right: 60px;
-  font-size: 14px; color: #94a3b8; font-weight: 500; letter-spacing: 1px;
+  font-size: 18px; color: #94a3b8; font-weight: 500; letter-spacing: 1px;
 }
 .content-layout {
   display: flex; height: 100%; padding: 70px 60px 50px;
@@ -234,11 +234,11 @@ export class SlideRendererService {
 .content-layout.no-image .content-left { flex: 1.2; }
 .content-layout.no-image .content-right { flex: 0.5; display: flex; align-items: center; justify-content: center; }
 .content-title {
-  font-size: 38px; font-weight: 800; color: #0f172a;
+  font-size: 46px; font-weight: 800; color: #0f172a;
   margin-bottom: 16px; line-height: 1.25;
 }
 .content-keymsg {
-  font-size: 18px; color: #64748b; margin-bottom: 30px;
+  font-size: 22px; color: #64748b; margin-bottom: 30px;
   padding-left: 16px;
   border-left: 3px solid #cbd5e1;
   line-height: 1.5;
@@ -254,12 +254,12 @@ export class SlideRendererService {
 }
 .bullet-marker {
   flex-shrink: 0;
-  width: 32px; height: 32px;
+  width: 36px; height: 36px;
   display: flex; align-items: center; justify-content: center;
   border-radius: 8px;
-  color: #fff; font-size: 14px; font-weight: 700;
+  color: #fff; font-size: 18px; font-weight: 700;
 }
-.bullet-text { font-size: 18px; color: #334155; line-height: 1.55; padding-top: 3px; }
+.bullet-text { font-size: 22px; color: #334155; line-height: 1.55; padding-top: 3px; }
 .content-image {
   width: 100%; height: 100%;
   border-radius: 16px; overflow: hidden;
@@ -321,10 +321,10 @@ export class SlideRendererService {
 .agenda-header { margin-bottom: 50px; }
 .agenda-badge {
   display: inline-block;
-  font-size: 13px; font-weight: 700; letter-spacing: 3px;
+  font-size: 17px; font-weight: 700; letter-spacing: 3px;
   color: #0ea5e9; margin-bottom: 16px;
 }
-.agenda-header h2 { font-size: 42px; font-weight: 800; }
+.agenda-header h2 { font-size: 50px; font-weight: 800; }
 .agenda-grid {
   display: grid; grid-template-columns: 1fr 1fr;
   gap: 20px; flex: 1;
@@ -338,11 +338,11 @@ export class SlideRendererService {
   transition: background 0.2s;
 }
 .agenda-num {
-  font-size: 28px; font-weight: 900;
+  font-size: 34px; font-weight: 900;
   color: #0ea5e9; letter-spacing: -1px;
   min-width: 50px;
 }
-.agenda-label { font-size: 20px; color: rgba(255,255,255,0.85); line-height: 1.4; }
+.agenda-label { font-size: 26px; color: rgba(255,255,255,0.85); line-height: 1.4; }
 `;
 
         return this.wrapPage(body, styles);
@@ -383,18 +383,18 @@ export class SlideRendererService {
         const styles = `
 .comparison-slide { background: #fafbfe; color: #1a1e2e; padding: 70px 80px; }
 .cmp-header { margin-bottom: 40px; }
-.cmp-header h2 { font-size: 38px; font-weight: 800; }
-.cmp-keymsg { font-size: 18px; color: #64748b; margin-top: 10px; }
+.cmp-header h2 { font-size: 46px; font-weight: 800; }
+.cmp-keymsg { font-size: 22px; color: #64748b; margin-top: 10px; }
 .cmp-columns { display: flex; gap: 0; flex: 1; }
 .cmp-col { flex: 1; padding: 30px; }
 .cmp-col-title {
-  font-size: 20px; font-weight: 800; margin-bottom: 24px;
+  font-size: 26px; font-weight: 800; margin-bottom: 24px;
   padding: 6px 16px; border-radius: 8px; display: inline-block;
 }
 .cmp-col-a .cmp-col-title { background: rgba(14,165,233,0.1); color: #0ea5e9; }
 .cmp-col-b .cmp-col-title { background: rgba(139,92,246,0.1); color: #8b5cf6; }
 .cmp-divider { width: 2px; background: #e2e8f0; margin: 0 10px; border-radius: 1px; }
-.cmp-item { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 18px; font-size: 18px; line-height: 1.55; }
+.cmp-item { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 18px; font-size: 22px; line-height: 1.55; }
 .cmp-dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 8px; flex-shrink: 0; }
 `;
 
@@ -425,7 +425,7 @@ export class SlideRendererService {
 
         const styles = `
 .timeline-slide { background: #0f172a; color: #fff; padding: 70px 80px; }
-.tl-header h2 { font-size: 38px; font-weight: 800; margin-bottom: 50px; }
+.tl-header h2 { font-size: 46px; font-weight: 800; margin-bottom: 50px; }
 .tl-track { display: flex; gap: 24px; align-items: flex-start; overflow: hidden; }
 .tl-item { flex: 1; display: flex; flex-direction: column; align-items: center; position: relative; }
 .tl-dot {
@@ -447,8 +447,8 @@ export class SlideRendererService {
   text-align: center;
   width: 100%;
 }
-.tl-num { font-size: 12px; font-weight: 700; color: #0ea5e9; letter-spacing: 2px; margin-bottom: 10px; }
-.tl-text { font-size: 16px; color: rgba(255,255,255,0.8); line-height: 1.5; }
+.tl-num { font-size: 16px; font-weight: 700; color: #0ea5e9; letter-spacing: 2px; margin-bottom: 10px; }
+.tl-text { font-size: 22px; color: rgba(255,255,255,0.8); line-height: 1.5; }
 `;
 
         return this.wrapPage(body, styles);
@@ -484,11 +484,11 @@ export class SlideRendererService {
 }
 .sum-content { position: relative; z-index: 2; padding: 80px 100px; }
 .sum-badge {
-  font-size: 13px; font-weight: 700; letter-spacing: 3px;
+  font-size: 17px; font-weight: 700; letter-spacing: 3px;
   color: ${isSummary ? '#10b981' : '#f59e0b'}; margin-bottom: 20px;
 }
-.sum-content h2 { font-size: 42px; font-weight: 800; margin-bottom: 16px; }
-.sum-keymsg { font-size: 20px; color: rgba(255,255,255,0.6); margin-bottom: 40px; }
+.sum-content h2 { font-size: 50px; font-weight: 800; margin-bottom: 16px; }
+.sum-keymsg { font-size: 26px; color: rgba(255,255,255,0.6); margin-bottom: 40px; }
 .sum-list { display: flex; flex-direction: column; gap: 16px; }
 .sum-item {
   display: flex; align-items: flex-start; gap: 18px;
@@ -498,11 +498,11 @@ export class SlideRendererService {
   border-radius: 12px;
 }
 .sum-check {
-  font-size: 20px; font-weight: 700;
+  font-size: 26px; font-weight: 700;
   color: ${isSummary ? '#10b981' : '#f59e0b'};
   min-width: 28px; text-align: center;
 }
-.sum-text { font-size: 18px; color: rgba(255,255,255,0.85); line-height: 1.55; }
+.sum-text { font-size: 24px; color: rgba(255,255,255,0.85); line-height: 1.55; }
 `;
 
         return this.wrapPage(body, styles);
