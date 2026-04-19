@@ -14,6 +14,7 @@ import { EvaluatorService } from './services/evaluator.service';
 import { DeckAudience, DeckFocus, DeckFormat, DeckLength, DeckStyle, DocumentData, PlannerMode } from './types';
 
 import { ChatService, ChatMessage } from './services/chat.service';
+import { PPTImageService } from './services/ppt-image.service';
 
 dotenv.config();
 
@@ -47,6 +48,7 @@ const pptService = new PPTService();
 const imageService = new ImageService();
 const evaluatorService = new EvaluatorService();
 const chatService = new ChatService();
+const pptImageService = new PPTImageService();
 
 // 新增对话生成 PPT 接口
 app.post('/api/chat', upload.array('files', 5), async (req: any, res: any) => {
@@ -125,22 +127,29 @@ app.post('/api/chat', upload.array('files', 5), async (req: any, res: any) => {
         let downloadUrl = undefined;
 
         if (chatResponse.pptData) {
-            console.log('LLM generated PPT data, processing images and PPTX...');
+            console.log('LLM generated PPT data, processing PPTX...');
             
-            const enableAiImages = process.env.ENABLE_AI_IMAGES !== 'false';
-            const imageConcurrency = Number(process.env.IMAGE_CONCURRENCY || 2);
-            if (enableAiImages) {
-                await imageService.enrichSlidesWithGeneratedImages(chatResponse.pptData.slides, imageConcurrency);
-            }
-
             const outputFilename = `presentation-chat-${Date.now()}.pptx`;
             const outputDir = path.join(__dirname, '../output');
             if (!fs.existsSync(outputDir)) {
                 fs.mkdirSync(outputDir, { recursive: true });
             }
             const outputPath = path.join(outputDir, outputFilename);
+
+            const useHtmlMode = process.env.PPT_RENDER_MODE !== 'legacy';
             
-            await pptService.generate(chatResponse.pptData, outputPath);
+            if (useHtmlMode) {
+                console.log('Using HTML→PNG→PPT rendering pipeline...');
+                await pptImageService.generate(chatResponse.pptData, outputPath);
+            } else {
+                console.log('Using legacy pptxgenjs rendering pipeline...');
+                const enableAiImages = process.env.ENABLE_AI_IMAGES !== 'false';
+                const imageConcurrency = Number(process.env.IMAGE_CONCURRENCY || 2);
+                if (enableAiImages) {
+                    await imageService.enrichSlidesWithGeneratedImages(chatResponse.pptData.slides, imageConcurrency);
+                }
+                await pptService.generate(chatResponse.pptData, outputPath);
+            }
             
             downloadUrl = `/output/${outputFilename}`;
         }
@@ -284,7 +293,13 @@ app.post('/generate-ppt', upload.single('file'), async (req, res) => {
         const outputPath = path.join(outputDir, outputFilename);
         
         console.log('Generating PPT...');
-        await pptService.generate(docData, outputPath);
+        const useHtmlMode = process.env.PPT_RENDER_MODE !== 'legacy';
+        if (useHtmlMode) {
+            console.log('Using HTML→PNG→PPT rendering pipeline...');
+            await pptImageService.generate(docData, outputPath);
+        } else {
+            await pptService.generate(docData, outputPath);
+        }
 
         const enableEvaluation = process.env.ENABLE_EVALUATION !== 'false';
         if (enableEvaluation) {
