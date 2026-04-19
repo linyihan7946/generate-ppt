@@ -50,6 +50,24 @@ const evaluatorService = new EvaluatorService();
 const chatService = new ChatService();
 const pptImageService = new PPTImageService();
 
+// 文档原始图片的会话级缓存（按上传时的文件名哈希存储，10分钟过期自动清理）
+interface ImageCacheEntry {
+    titleMap: Map<string, string[]>;  // slideTitle -> images[]
+    ordered: string[];                // 按顺序全部图片
+    createdAt: number;
+}
+const docImageCache = new Map<string, ImageCacheEntry>();
+const IMAGE_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+
+function cleanExpiredImageCache() {
+    const now = Date.now();
+    for (const [key, entry] of docImageCache) {
+        if (now - entry.createdAt > IMAGE_CACHE_TTL) {
+            docImageCache.delete(key);
+        }
+    }
+}
+
 // 新增对话生成 PPT 接口
 app.post('/api/chat', upload.array('files', 5), async (req: any, res: any) => {
     try {
@@ -74,6 +92,11 @@ app.post('/api/chat', upload.array('files', 5), async (req: any, res: any) => {
         console.log('Received chat request, messages count:', messages.length, ', files count:', files?.length || 0);
 
         let docContent = '';
+        // 保存 parser 解析出的文档原始图片，用于后续回填到 LLM 生成的 slides 中
+        const docOriginalImages: Map<string, string[]> = new Map(); // slideTitle -> images[]
+        const docOrderedImages: string[] = []; // 按顺序收集所有图片
+        // 用于缓存的 key（文档文件名）
+        let imageCacheKey = '';
         
         if (files && files.length > 0) {
             console.log('Processing uploaded files...');
@@ -96,7 +119,9 @@ app.post('/api/chat', upload.array('files', 5), async (req: any, res: any) => {
                     } else if (['.png', '.jpg', '.jpeg'].includes(ext)) {
                         const base64 = fs.readFileSync(file.path).toString('base64');
                         const mimeType = ext === '.png' ? 'image/png' : 'image/jpeg';
-                        docContent += `\n\n[用户上传了图片: ${file.originalname}]\n图片数据: data:${mimeType};base64,${base64.substring(0, 100)}...`;
+                        const dataUrl = `data:${mimeType};base64,${base64}`;
+                        docContent += `\n\n[用户上传了图片: ${file.originalname}]`;
+                        docOrderedImages.push(dataUrl);
                     }
                     
                     // Clean up temp file
@@ -117,8 +142,45 @@ app.post('/api/chat', upload.array('files', 5), async (req: any, res: any) => {
                         if (slide.bullets.length > 0) {
                             docContent += slide.bullets.map(b => `- ${b}`).join('\n') + '\n';
                         }
+                        // 收集文档中的原始图片
+                        if (slide.images && slide.images.length > 0) {
+                            docOriginalImages.set(slide.title.trim().toLowerCase(), [...slide.images]);
+                            docOrderedImages.push(...slide.images);
+                        }
                     });
                 });
+                if (docOrderedImages.length > 0) {
+                    console.log(`Extracted ${docOrderedImages.length} original images from uploaded documents`);
+                }
+                // 缓存图片供后续请求（确认生成阶段）使用
+                if (docOrderedImages.length > 0) {
+                    imageCacheKey = primaryDoc.title.trim().toLowerCase();
+                    cleanExpiredImageCache();
+                    docImageCache.set(imageCacheKey, {
+                        titleMap: new Map(docOriginalImages),
+                        ordered: [...docOrderedImages],
+                        createdAt: Date.now(),
+                    });
+                    console.log(`Cached ${docOrderedImages.length} images under key: "${imageCacheKey}"`);
+                }
+            }
+        }
+        
+        // 如果当前请求没有上传文件（确认生成阶段），尝试从缓存恢复图片
+        if (docOrderedImages.length === 0 && docImageCache.size > 0) {
+            // 从聊天历史中提取可能的文档标题
+            const allText = messages.map(m => m.content).join(' ') + ' ' + text;
+            for (const [key, entry] of docImageCache) {
+                if (Date.now() - entry.createdAt > IMAGE_CACHE_TTL) continue;
+                // 模糊匹配：缓存 key 出现在对话内容中，或者取最近的缓存
+                if (allText.toLowerCase().includes(key) || docImageCache.size === 1) {
+                    for (const [title, imgs] of entry.titleMap) {
+                        docOriginalImages.set(title, imgs);
+                    }
+                    docOrderedImages.push(...entry.ordered);
+                    console.log(`Restored ${entry.ordered.length} cached images from key: "${key}"`);
+                    break;
+                }
             }
         }
 
@@ -128,6 +190,41 @@ app.post('/api/chat', upload.array('files', 5), async (req: any, res: any) => {
 
         if (chatResponse.pptData) {
             console.log('LLM generated PPT data, processing PPTX...');
+
+            // 回填文档原始图片到 LLM 生成的 slides
+            if (docOrderedImages.length > 0 && chatResponse.pptData.slides) {
+                let backfilledCount = 0;
+                const slides = chatResponse.pptData.slides;
+                
+                // 策略1: 按标题匹配回填
+                for (const slide of slides) {
+                    if (slide.images && slide.images.length > 0) continue;
+                    const titleKey = slide.title.trim().toLowerCase();
+                    const matched = docOriginalImages.get(titleKey);
+                    if (matched && matched.length > 0) {
+                        slide.images = [...matched];
+                        backfilledCount += matched.length;
+                    }
+                }
+                
+                // 策略2: 未匹配到的空 slide，按顺序轮流分配剩余图片
+                const usedImages = new Set(slides.flatMap(s => s.images || []));
+                const unusedImages = docOrderedImages.filter(img => !usedImages.has(img));
+                if (unusedImages.length > 0) {
+                    let imgIdx = 0;
+                    for (const slide of slides) {
+                        if (slide.images && slide.images.length > 0) continue;
+                        if (imgIdx >= unusedImages.length) break;
+                        slide.images = [unusedImages[imgIdx]];
+                        imgIdx++;
+                        backfilledCount++;
+                    }
+                }
+                
+                if (backfilledCount > 0) {
+                    console.log(`Backfilled ${backfilledCount} original document images into slides`);
+                }
+            }
             
             const outputFilename = `presentation-chat-${Date.now()}.pptx`;
             const outputDir = path.join(__dirname, '../output');
