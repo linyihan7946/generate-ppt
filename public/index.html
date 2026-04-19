@@ -55,6 +55,20 @@
         .file-chip { display: flex; align-items: center; gap: 6px; padding: 6px 12px; background: #E0F2FE; border-radius: 20px; font-size: 13px; color: #0369A1; }
         .file-chip .remove { cursor: pointer; font-weight: bold; color: #EF4444; }
         .file-chip .remove:hover { color: #DC2626; }
+
+        /* Outline Preview Styles */
+        .outline-card { background: #FFFBEB; border: 1px solid #FCD34D; border-radius: 10px; padding: 16px; margin-top: 10px; }
+        .outline-card h3 { margin: 0 0 8px 0; color: #92400E; font-size: 16px; }
+        .outline-card .outline-meta { font-size: 13px; color: #78716C; margin-bottom: 12px; line-height: 1.6; }
+        .outline-card .outline-slide { margin-bottom: 10px; padding: 10px; background: white; border-radius: 8px; border: 1px solid #E5E7EB; }
+        .outline-card .outline-slide .slide-header { font-weight: bold; color: #1E293B; font-size: 14px; margin-bottom: 4px; }
+        .outline-card .outline-slide .slide-key { font-size: 12px; color: #0369A1; font-style: italic; margin-bottom: 4px; }
+        .outline-card .outline-slide .slide-bullet { font-size: 13px; color: #475569; padding-left: 12px; line-height: 1.5; }
+        .outline-actions { display: flex; gap: 10px; margin-top: 14px; }
+        .outline-actions .btn-confirm { padding: 10px 24px; background: #10B981; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 14px; }
+        .outline-actions .btn-confirm:hover { background: #059669; }
+        .outline-actions .btn-edit { padding: 10px 24px; background: #F1F5F9; color: #334155; border: 1px solid #CBD5E1; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 14px; }
+        .outline-actions .btn-edit:hover { background: #E2E8F0; }
     </style>
 </head>
 <body>
@@ -69,7 +83,7 @@
     <div id="chat-panel" class="panel active">
         <div class="chat-container">
             <div class="chat-messages" id="chat-messages">
-                <div class="message system">您好！我是 AI 演示文稿专家。为了给您生成最合适的 PPT，可以直接上传您的文档（支持 .docx, .pdf, .md, .png, .jpg 格式），或者告诉我这个 PPT 的主要用途是什么？</div>
+                <div class="message system">您好！我是 AI 演示文稿专家。我会通过几轮对话了解您的需求，生成大纲供您确认后，再为您制作最终的 PPT。<br><br>您可以直接上传文档（支持 .docx, .pdf, .md 格式），或者告诉我您想做什么主题的 PPT？</div>
             </div>
             <div class="chat-input-area">
                 <div class="chat-input-wrapper">
@@ -212,17 +226,44 @@
 
         window.handleFileSelect = handleFileSelect;
 
-        function appendMessage(role, content, downloadUrl = null) {
+        function appendMessage(role, content, downloadUrl = null, outlineData = null) {
             const div = document.createElement('div');
             div.className = `message ${role}`;
             
             if (role === 'user' && attachedFiles.length > 0) {
-                div.innerHTML = `<div style="margin-bottom: 8px;">${content}</div>`;
+                div.innerHTML = `<div style="margin-bottom: 8px;">${escapeHtml(content)}</div>`;
                 div.innerHTML += attachedFiles.map(f => 
-                    `<div style="font-size: 12px; opacity: 0.8;">📎 ${f.name}</div>`
+                    `<div style="font-size: 12px; opacity: 0.8;">📎 ${escapeHtml(f.name)}</div>`
                 ).join('');
             } else {
                 div.innerText = content;
+            }
+
+            if (outlineData) {
+                const card = document.createElement('div');
+                card.className = 'outline-card';
+                let html = `<h3>📋 PPT 大纲预览</h3>`;
+                html += `<div class="outline-meta">`;
+                if (outlineData.title) html += `<strong>标题：</strong>${escapeHtml(outlineData.title)}<br>`;
+                if (outlineData.brief?.deckGoal) html += `<strong>目标：</strong>${escapeHtml(outlineData.brief.deckGoal)}<br>`;
+                if (outlineData.brief?.audience) html += `<strong>受众：</strong>${escapeHtml(outlineData.brief.audience)}<br>`;
+                if (outlineData.brief?.style) html += `<strong>风格：</strong>${escapeHtml(outlineData.brief.style)}`;
+                html += `</div>`;
+                outlineData.slides.forEach((slide, idx) => {
+                    html += `<div class="outline-slide">`;
+                    html += `<div class="slide-header">第${idx + 1}页：${escapeHtml(slide.title)}</div>`;
+                    if (slide.keyMessage) html += `<div class="slide-key">💡 ${escapeHtml(slide.keyMessage)}</div>`;
+                    slide.bullets.forEach(b => {
+                        html += `<div class="slide-bullet">• ${escapeHtml(b)}</div>`;
+                    });
+                    html += `</div>`;
+                });
+                html += `<div class="outline-actions">`;
+                html += `<button class="btn-confirm" onclick="confirmOutline()">✅ 确认生成 PPT</button>`;
+                html += `<button class="btn-edit" onclick="editOutline()">✏️ 我想调整</button>`;
+                html += `</div>`;
+                card.innerHTML = html;
+                div.appendChild(card);
             }
             
             if (downloadUrl) {
@@ -232,6 +273,26 @@
             messagesContainer.appendChild(div);
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
         }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function confirmOutline() {
+            chatInput.value = '确认生成，请开始生成PPT';
+            sendMessage();
+        }
+
+        function editOutline() {
+            chatInput.value = '';
+            chatInput.placeholder = '请输入您想调整的内容，比如"第3页去掉"、"增加一页关于xxx的内容"...';
+            chatInput.focus();
+        }
+
+        window.confirmOutline = confirmOutline;
+        window.editOutline = editOutline;
 
         function handleKeyPress(e) {
             if (e.key === 'Enter' && !e.shiftKey) {
@@ -285,8 +346,13 @@
                 document.getElementById(loadingId).remove();
 
                 if (response.ok) {
-                    appendMessage('system', data.reply, data.downloadUrl);
-                    chatHistory.push({ role: 'assistant', content: data.reply });
+                    appendMessage('system', data.reply, data.downloadUrl, data.outlineData);
+                    // 保存大纲原始文本到历史（含 outline 标记，供后端判断阶段）
+                    let historyContent = data.reply;
+                    if (data.outlineData) {
+                        historyContent += '\n```outline\n' + formatOutlineForHistory(data.outlineData) + '\n```';
+                    }
+                    chatHistory.push({ role: 'assistant', content: historyContent });
                 } else {
                     appendMessage('system', '❌ 请求失败: ' + (data.error || '未知错误'));
                 }
@@ -298,6 +364,22 @@
                 sendBtn.disabled = false;
                 chatInput.focus();
             }
+        }
+
+        function formatOutlineForHistory(outline) {
+            let text = '';
+            if (outline.title) text += `标题：${outline.title}\n`;
+            if (outline.brief?.deckGoal) text += `目标：${outline.brief.deckGoal}\n`;
+            if (outline.brief?.audience) text += `受众：${outline.brief.audience}\n`;
+            if (outline.brief?.style) text += `风格：${outline.brief.style}\n`;
+            text += '\n';
+            outline.slides.forEach((slide, idx) => {
+                text += `第${idx + 1}页 ${slide.title}\n`;
+                if (slide.keyMessage) text += `  核心观点：${slide.keyMessage}\n`;
+                slide.bullets.forEach(b => { text += `  - ${b}\n`; });
+                text += '\n';
+            });
+            return text;
         }
 
         window.sendMessage = sendMessage;

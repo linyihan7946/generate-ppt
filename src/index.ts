@@ -59,7 +59,9 @@ app.post('/api/chat', upload.array('files', 5), async (req: any, res: any) => {
         const messagesRaw = req.body.messages;
         
         let messages: ChatMessage[] = [];
-        if (messagesRaw) {
+        if (Array.isArray(messagesRaw)) {
+            messages = messagesRaw;
+        } else if (typeof messagesRaw === 'string') {
             try {
                 messages = JSON.parse(messagesRaw);
             } catch {
@@ -145,7 +147,8 @@ app.post('/api/chat', upload.array('files', 5), async (req: any, res: any) => {
 
         res.json({
             reply: chatResponse.reply,
-            downloadUrl: downloadUrl
+            downloadUrl: downloadUrl,
+            outlineData: chatResponse.outlineData || undefined,
         });
 
     } catch (error: any) {
