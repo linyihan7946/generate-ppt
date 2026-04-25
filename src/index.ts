@@ -233,10 +233,10 @@ app.post('/api/chat', upload.array('files', 5), async (req: any, res: any) => {
             }
             const outputPath = path.join(outputDir, outputFilename);
 
-            const useHtmlMode = process.env.PPT_RENDER_MODE !== 'legacy';
-            
+            const useHtmlMode = process.env.PPT_RENDER_MODE === 'html';
+                        
             if (useHtmlMode) {
-                console.log('Using HTML→PNG→PPT rendering pipeline...');
+                console.log('Using HTML\u2192PNG\u2192PPT rendering pipeline...');
                 const enableAiImages = process.env.ENABLE_AI_IMAGES !== 'false';
                 const imageConcurrency = Number(process.env.IMAGE_CONCURRENCY || 2);
                 if (enableAiImages) {
@@ -245,7 +245,7 @@ app.post('/api/chat', upload.array('files', 5), async (req: any, res: any) => {
                 }
                 await pptImageService.generate(chatResponse.pptData, outputPath);
             } else {
-                console.log('Using legacy pptxgenjs rendering pipeline...');
+                console.log('Using native pptxgenjs rendering pipeline...');
                 const enableAiImages = process.env.ENABLE_AI_IMAGES !== 'false';
                 const imageConcurrency = Number(process.env.IMAGE_CONCURRENCY || 2);
                 if (enableAiImages) {
@@ -396,11 +396,12 @@ app.post('/generate-ppt', upload.single('file'), async (req, res) => {
         const outputPath = path.join(outputDir, outputFilename);
         
         console.log('Generating PPT...');
-        const useHtmlMode = process.env.PPT_RENDER_MODE !== 'legacy';
+        const useHtmlMode = process.env.PPT_RENDER_MODE === 'html';
         if (useHtmlMode) {
-            console.log('Using HTML→PNG→PPT rendering pipeline...');
+            console.log('Using HTML\u2192PNG\u2192PPT rendering pipeline...');
             await pptImageService.generate(docData, outputPath);
         } else {
+            console.log('Using native pptxgenjs rendering pipeline...');
             await pptService.generate(docData, outputPath);
         }
 

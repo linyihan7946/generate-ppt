@@ -5,6 +5,7 @@ const SLIDE_WIDTH = 13.333;
 const SLIDE_HEIGHT = 7.5;
 const COLORS = {
     ink: '0F172A',
+    darkBg: '0A0F1E',
     slate: '334155',
     muted: '64748B',
     line: 'CBD5E1',
@@ -14,12 +15,18 @@ const COLORS = {
     accent: '0EA5E9',
     accentDark: '0369A1',
     accentSoft: 'BAE6FD',
+    accentLight: 'E0F2FE',
     success: '16A34A',
     successSoft: 'DCFCE7',
     amber: 'D97706',
     amberSoft: 'FEF3C7',
+    violet: '8B5CF6',
     violetSoft: 'EDE9FE',
+    violetBg: '7C3AED',
     white: 'FFFFFF',
+    whiteAlpha06: 'F0F0F0',
+    whiteAlpha10: 'E6E6E6',
+    blueFade: '93C5FD',
 };
 
 interface PptRenderConfig {
@@ -88,108 +95,137 @@ export class PPTService {
         const brief = data.brief;
         const isCjk = this.isMostlyCjk([data.title, brief?.deckGoal || '', slides.map((item) => item.title).join(' ')].join(' '));
 
+        // Dark background base
+        slide.background = { color: COLORS.darkBg };
+
+        // Background pattern: radial glow accent (left)
+        slide.addShape('ellipse', {
+            x: -1.0, y: 0.5, w: 7.0, h: 6.0,
+            line: { color: COLORS.accent, transparency: 100 },
+            fill: { color: COLORS.accent, transparency: 85 },
+        });
+        // Background pattern: radial glow violet (right)
+        slide.addShape('ellipse', {
+            x: 7.5, y: -1.0, w: 5.5, h: 4.5,
+            line: { color: COLORS.violet, transparency: 100 },
+            fill: { color: COLORS.violet, transparency: 88 },
+        });
+
+        // Cover image on right 55% with gradient mask simulation
         if (coverImage && config.templateStyle) {
-            this.addImage(slide, coverImage, 0, 0, SLIDE_WIDTH, SLIDE_HEIGHT);
+            this.addImage(slide, coverImage, 6.0, 0, 7.333, SLIDE_HEIGHT);
+            // Gradient overlay: left part dark
             slide.addShape('rect', {
-                x: 0,
-                y: 0,
-                w: SLIDE_WIDTH,
-                h: SLIDE_HEIGHT,
-                line: { color: COLORS.ink, transparency: 100 },
-                fill: { color: COLORS.ink, transparency: 38 },
+                x: 6.0, y: 0, w: 3.5, h: SLIDE_HEIGHT,
+                line: { color: COLORS.darkBg, transparency: 100 },
+                fill: { color: COLORS.darkBg, transparency: 20 },
             });
-        } else {
-            this.addDarkBackground(slide);
+            // Semi-transparent overlay on image
+            slide.addShape('rect', {
+                x: 6.0, y: 0, w: 7.333, h: SLIDE_HEIGHT,
+                line: { color: COLORS.darkBg, transparency: 100 },
+                fill: { color: COLORS.darkBg, transparency: 55 },
+            });
         }
 
-        this.addSectionTag(slide, isCjk ? '主题演示' : 'Presentation', COLORS.accent, 0.82, 0.74, 2.3, false);
+        // Bottom gradient overlay
+        slide.addShape('rect', {
+            x: 0, y: 5.0, w: SLIDE_WIDTH, h: 2.5,
+            line: { color: COLORS.darkBg, transparency: 100 },
+            fill: { color: COLORS.darkBg, transparency: 10 },
+        });
+
+        // Decorative circles (border only)
+        slide.addShape('ellipse', {
+            x: 10.0, y: -1.0, w: 5.0, h: 5.0,
+            line: { color: COLORS.accent, width: 0.5, transparency: 85 },
+            fill: { type: 'none' } as any,
+        });
+        slide.addShape('ellipse', {
+            x: 10.8, y: 0.3, w: 3.0, h: 3.0,
+            line: { color: COLORS.violet, width: 0.5, transparency: 88 },
+            fill: { type: 'none' } as any,
+        });
+
+        // PRESENTATION badge
+        slide.addShape('roundRect', {
+            x: 0.75, y: 1.0, w: 2.6, h: 0.42,
+            rectRadius: 0.21,
+            line: { color: COLORS.accent, width: 1.0, transparency: 60 },
+            fill: { type: 'none' } as any,
+        });
+        slide.addText('PRESENTATION', {
+            x: 0.75, y: 1.0, w: 2.6, h: 0.42,
+            fontSize: 11, fontFace: 'Microsoft YaHei',
+            color: COLORS.accent,
+            bold: true,
+            charSpacing: 3,
+            align: 'center',
+            valign: 'middle',
+        });
+
+        // Main title (large)
         slide.addText(data.title, {
-            x: 0.8,
-            y: 1.65,
-            w: 8.9,
-            h: 1.85,
-            fontSize: 28,
+            x: 0.75, y: 1.7, w: 8.5, h: 2.0,
+            fontSize: 38,
             color: COLORS.white,
             bold: true,
             fit: 'shrink',
             valign: 'middle',
         });
 
+        // Goal / subtitle
         const goal = this.cleanInlineText(brief?.deckGoal || '');
         if (goal) {
             slide.addText(goal, {
-                x: 0.82,
-                y: 3.65,
-                w: 7.6,
-                h: 0.55,
-                fontSize: 15,
-                color: 'DBEAFE',
+                x: 0.78, y: 3.85, w: 7.2, h: 0.65,
+                fontSize: 16,
+                color: 'B4C6DB',
                 fit: 'shrink',
+                valign: 'top',
             });
         }
 
-        const takeaways = this.buildCoverTakeaways(brief, slides).slice(0, 3);
-        takeaways.forEach((item, index) => {
+        // Meta tags row (audience + style capsules)
+        const audience = brief?.audience || '';
+        const style = brief?.style || '';
+        let metaX = 0.78;
+        if (audience) {
+            const tagW = Math.max(1.5, audience.length * 0.16 + 0.8);
             slide.addShape('roundRect', {
-                x: 0.85,
-                y: 4.45 + index * 0.62,
-                w: 4.75,
-                h: 0.42,
-                line: { color: COLORS.white, transparency: 100 },
-                fill: { color: COLORS.white, transparency: 88 },
+                x: metaX, y: 4.7, w: tagW, h: 0.38,
+                rectRadius: 0.08,
+                line: { color: COLORS.white, width: 0.5, transparency: 90 },
+                fill: { color: COLORS.white, transparency: 94 },
             });
-            slide.addText(item, {
-                x: 1.02,
-                y: 4.56 + index * 0.62,
-                w: 4.35,
-                h: 0.16,
-                fontSize: 11,
-                color: COLORS.paper,
-                fit: 'shrink',
+            slide.addText(`\u{1F465}  ${String(audience)}`, {
+                x: metaX, y: 4.7, w: tagW, h: 0.38,
+                fontSize: 11, color: 'B0BEC5',
+                align: 'center', valign: 'middle',
             });
+            metaX += tagW + 0.2;
+        }
+        if (style) {
+            const tagW = Math.max(1.5, style.length * 0.16 + 0.8);
+            slide.addShape('roundRect', {
+                x: metaX, y: 4.7, w: tagW, h: 0.38,
+                rectRadius: 0.08,
+                line: { color: COLORS.white, width: 0.5, transparency: 90 },
+                fill: { color: COLORS.white, transparency: 94 },
+            });
+            slide.addText(`\u{1F3A8}  ${String(style)}`, {
+                x: metaX, y: 4.7, w: tagW, h: 0.38,
+                fontSize: 11, color: 'B0BEC5',
+                align: 'center', valign: 'middle',
+            });
+        }
+
+        // Accent line (bottom-left)
+        slide.addShape('rect', {
+            x: 0.75, y: 6.2, w: 2.0, h: 0.04,
+            line: { color: COLORS.accent, transparency: 100 },
+            fill: { color: COLORS.accent, transparency: 0 },
         });
-
-        const coverTopics = this.buildCoverTopics(brief, slides).slice(0, 4);
-        if (coverTopics.length > 0) {
-            slide.addShape('roundRect', {
-                x: 8.95,
-                y: 1.18,
-                w: 3.6,
-                h: 4.12,
-                line: { color: COLORS.white, transparency: 100 },
-                fill: { color: COLORS.white, transparency: 82 },
-            });
-            slide.addText(isCjk ? '内容脉络' : 'Outline', {
-                x: 9.22,
-                y: 1.46,
-                w: 2.3,
-                h: 0.24,
-                fontSize: 15,
-                color: COLORS.ink,
-                bold: true,
-                fit: 'shrink',
-            });
-
-            coverTopics.forEach((item, index) => {
-                slide.addShape('roundRect', {
-                    x: 9.18,
-                    y: 1.92 + index * 0.72,
-                    w: 3.02,
-                    h: 0.5,
-                    line: { color: COLORS.line, transparency: 100 },
-                    fill: { color: COLORS.panelSoft, transparency: 10 },
-                });
-                slide.addText(item, {
-                    x: 9.38,
-                    y: 2.08 + index * 0.72,
-                    w: 2.62,
-                    h: 0.16,
-                    fontSize: 12,
-                    color: COLORS.ink,
-                    fit: 'shrink',
-                });
-            });
-        }
     }
 
     private addRoleAwareSlide(
@@ -241,112 +277,76 @@ export class PPTService {
     }
 
     private addAgendaSlide(slide: pptxgen.Slide, slideData: SlideContent, brief?: DeckBrief): void {
-        this.addLightBackground(slide);
+        // Dark background matching HTML agenda-slide
+        slide.background = { color: COLORS.ink };
+
+        // Subtle radial glows
+        slide.addShape('ellipse', {
+            x: -2.0, y: 5.0, w: 8.0, h: 5.0,
+            line: { color: COLORS.accent, transparency: 100 },
+            fill: { color: COLORS.accent, transparency: 92 },
+        });
+        slide.addShape('ellipse', {
+            x: 9.0, y: -2.0, w: 6.0, h: 5.0,
+            line: { color: COLORS.violet, transparency: 100 },
+            fill: { color: COLORS.violet, transparency: 94 },
+        });
+
         const isCjk = this.isMostlyCjk([slideData.title, slideData.summary || '', ...(brief?.coreTakeaways || [])].join(' '));
-        this.addSectionTag(slide, isCjk ? '内容导航' : 'Agenda', COLORS.accent, 0.85, 0.62, 1.45, false);
+
+        // CONTENTS badge
+        slide.addText(isCjk ? '\u76EE\u5F55' : 'CONTENTS', {
+            x: 0.75, y: 0.65, w: 2.5, h: 0.3,
+            fontSize: 11, color: COLORS.accent,
+            bold: true, charSpacing: 3,
+        });
+
+        // Title
         slide.addText(slideData.title, {
-            x: 0.85,
-            y: 1.15,
-            w: 4.4,
-            h: 0.75,
-            fontSize: 24,
-            color: COLORS.ink,
-            bold: true,
-            fit: 'shrink',
+            x: 0.75, y: 1.1, w: 11.5, h: 0.85,
+            fontSize: 30, color: COLORS.white,
+            bold: true, fit: 'shrink',
         });
 
-        const summary = this.cleanInlineText(slideData.summary || slideData.keyMessage || '');
-        if (summary) {
-            slide.addText(summary, {
-                x: 0.88,
-                y: 2.02,
-                w: 3.95,
-                h: 0.9,
-                fontSize: 13,
-                color: COLORS.slate,
-                fit: 'shrink',
-            });
-        }
-
-        slide.addShape('roundRect', {
-            x: 0.82,
-            y: 3.02,
-            w: 4.1,
-            h: 3.45,
-            line: { color: COLORS.line, transparency: 20 },
-            fill: { color: COLORS.panel, transparency: 0 },
-        });
-        slide.addText(isCjk ? '本次聚焦' : 'Focus', {
-            x: 1.05,
-            y: 3.28,
-            w: 1.7,
-            h: 0.22,
-            fontSize: 15,
-            color: COLORS.ink,
-            bold: true,
-            fit: 'shrink',
-        });
-        const focusItems = this.buildAgendaFocusItems(brief, slideData).slice(0, 4);
-        focusItems.forEach((item, index) => {
-            slide.addShape('roundRect', {
-                x: 1.0,
-                y: 3.68 + index * 0.65,
-                w: 3.72,
-                h: 0.46,
-                line: { color: COLORS.line, transparency: 100 },
-                fill: { color: index % 2 === 0 ? COLORS.panelSoft : COLORS.accentSoft, transparency: 18 },
-            });
-            slide.addText(item, {
-                x: 1.18,
-                y: 3.82 + index * 0.65,
-                w: 3.35,
-                h: 0.15,
-                fontSize: 12,
-                color: COLORS.ink,
-                fit: 'shrink',
-            });
-        });
-
+        // Agenda items in 2-column grid
         const agendaItems = this.deduplicateBullets(
             (brief?.chapterTitles || []).length > 0 ? brief!.chapterTitles : slideData.bullets,
-        ).slice(0, 6);
+        ).slice(0, 8);
+
+        const cols = 2;
+        const cardW = 5.5;
+        const cardH = 0.72;
+        const gapX = 0.5;
+        const gapY = 0.18;
+        const startX = 0.75;
+        const startY = 2.3;
 
         agendaItems.forEach((item, index) => {
-            const y = 1.45 + index * 0.86;
+            const col = index % cols;
+            const row = Math.floor(index / cols);
+            const x = startX + col * (cardW + gapX);
+            const y = startY + row * (cardH + gapY);
+
+            // Card background (semi-transparent)
             slide.addShape('roundRect', {
-                x: 5.4,
-                y,
-                w: 6.95,
-                h: 0.65,
-                line: { color: COLORS.line, transparency: 35 },
-                fill: { color: index % 2 === 0 ? COLORS.panel : COLORS.panelSoft, transparency: 12 },
+                x, y, w: cardW, h: cardH,
+                rectRadius: 0.1,
+                line: { color: COLORS.white, width: 0.5, transparency: 92 },
+                fill: { color: COLORS.white, transparency: 96 },
             });
-            slide.addShape('roundRect', {
-                x: 5.62,
-                y: y + 0.11,
-                w: 0.55,
-                h: 0.43,
-                line: { color: COLORS.accentDark, transparency: 100 },
-                fill: { color: COLORS.accent, transparency: 0 },
+
+            // Large number (accent color)
+            slide.addText(String(index + 1).padStart(2, '0'), {
+                x: x + 0.2, y: y + 0.1, w: 0.65, h: 0.52,
+                fontSize: 22, color: COLORS.accent,
+                bold: true, valign: 'middle',
             });
-            slide.addText(String(index + 1), {
-                x: 5.81,
-                y: y + 0.18,
-                w: 0.18,
-                h: 0.13,
-                fontSize: 11,
-                color: COLORS.white,
-                bold: true,
-                align: 'center',
-            });
+
+            // Item label
             slide.addText(item, {
-                x: 6.36,
-                y: y + 0.15,
-                w: 5.62,
-                h: 0.28,
-                fontSize: 15,
-                color: COLORS.ink,
-                fit: 'shrink',
+                x: x + 0.9, y: y + 0.1, w: cardW - 1.2, h: 0.52,
+                fontSize: 16, color: 'D9E2EC',
+                fit: 'shrink', valign: 'middle',
             });
         });
     }
@@ -415,67 +415,184 @@ export class PPTService {
     }
 
     private addTimelineSlide(slide: pptxgen.Slide, slideData: SlideContent): void {
-        this.addLightBackground(slide);
-        this.addStandardHeader(slide, slideData, this.getRoleTagLabel('timeline', slideData), COLORS.amber);
+        // Dark background matching HTML timeline-slide
+        this.addDarkBackground(slide);
 
-        const events = this.buildTimelineEvents(slideData).slice(0, 4);
+        // Title
+        slide.addText(slideData.title, {
+            x: 0.6, y: 0.5, w: 12.0, h: 0.85,
+            fontSize: 28, color: COLORS.white,
+            bold: true, fit: 'shrink',
+        });
+
+        const events = this.buildTimelineEvents(slideData).slice(0, 5);
+        const count = events.length;
+        const trackY = 3.1;
+        const totalW = 11.5;
+        const startX = 0.9;
+        const itemW = totalW / count;
+
+        // Horizontal track line
         slide.addShape('rect', {
-            x: 1.15,
-            y: 3.25,
-            w: 10.95,
-            h: 0.08,
-            line: { color: COLORS.amber, transparency: 100 },
-            fill: { color: COLORS.amber, transparency: 0 },
+            x: startX, y: trackY, w: totalW, h: 0.04,
+            line: { color: COLORS.accent, transparency: 100 },
+            fill: { color: COLORS.accent, transparency: 70 },
         });
 
         events.forEach((event, index) => {
-            const x = 1.28 + index * 3.05;
-            const cardY = index % 2 === 0 ? 1.75 : 3.82;
-            slide.addShape('roundRect', {
-                x,
-                y: 3.02,
-                w: 0.32,
-                h: 0.32,
-                line: { color: COLORS.amber, transparency: 100 },
-                fill: { color: COLORS.amber, transparency: 0 },
+            const cx = startX + index * itemW + itemW / 2;
+
+            // Glow circle (larger, semi-transparent)
+            slide.addShape('ellipse', {
+                x: cx - 0.18, y: trackY - 0.16, w: 0.36, h: 0.36,
+                line: { color: COLORS.accent, transparency: 100 },
+                fill: { color: COLORS.accent, transparency: 60 },
             });
-            slide.addShape('roundRect', {
-                x: x - 0.18,
-                y: cardY,
-                w: 2.55,
-                h: 1.12,
-                line: { color: COLORS.line, transparency: 35 },
-                fill: { color: COLORS.panel, transparency: 0 },
+            // Dot center
+            slide.addShape('ellipse', {
+                x: cx - 0.1, y: trackY - 0.08, w: 0.2, h: 0.2,
+                line: { color: COLORS.accent, transparency: 100 },
+                fill: { color: COLORS.accent, transparency: 0 },
             });
+
+            // Connector line to next (skip last)
+            if (index < count - 1) {
+                const nextCx = startX + (index + 1) * itemW + itemW / 2;
+                slide.addShape('rect', {
+                    x: cx + 0.1, y: trackY - 0.01, w: nextCx - cx - 0.2, h: 0.06,
+                    line: { color: COLORS.accent, transparency: 100 },
+                    fill: { color: COLORS.accent, transparency: 70 },
+                });
+            }
+
+            // Card below track
+            const cardY = trackY + 0.6;
+            const cardW = itemW - 0.3;
+            const cardX = cx - cardW / 2;
+
+            slide.addShape('roundRect', {
+                x: cardX, y: cardY, w: cardW, h: 2.2,
+                rectRadius: 0.1,
+                line: { color: COLORS.white, width: 0.5, transparency: 92 },
+                fill: { color: COLORS.white, transparency: 96 },
+            });
+
+            // STEP label
+            const isCjk = this.isMostlyCjk(event.detail);
+            slide.addText(isCjk ? `\u6B65\u9AA4 ${index + 1}` : `STEP ${index + 1}`, {
+                x: cardX + 0.15, y: cardY + 0.15, w: cardW - 0.3, h: 0.25,
+                fontSize: 10, color: COLORS.accent,
+                bold: true, charSpacing: 2,
+            });
+
+            // Event label
             slide.addText(event.label, {
-                x: x + 0.02,
-                y: cardY + 0.12,
-                w: 2.02,
-                h: 0.2,
-                fontSize: 11,
-                color: COLORS.amber,
-                bold: true,
-                fit: 'shrink',
+                x: cardX + 0.15, y: cardY + 0.45, w: cardW - 0.3, h: 0.35,
+                fontSize: 13, color: COLORS.white,
+                bold: true, fit: 'shrink', valign: 'top',
             });
+
+            // Event detail
             slide.addText(event.detail, {
-                x: x + 0.02,
-                y: cardY + 0.34,
-                w: 2.16,
-                h: 0.58,
-                fontSize: 13,
-                color: COLORS.ink,
-                fit: 'shrink',
-                valign: 'middle',
+                x: cardX + 0.15, y: cardY + 0.85, w: cardW - 0.3, h: 1.15,
+                fontSize: 11, color: 'B0BEC5',
+                fit: 'shrink', valign: 'top',
             });
         });
     }
 
     private addComparisonSlide(slide: pptxgen.Slide, slideData: SlideContent): void {
         this.addLightBackground(slide);
-        this.addStandardHeader(slide, slideData, this.getRoleTagLabel('comparison', slideData), COLORS.accentDark);
+
+        // Header
+        slide.addText(slideData.title, {
+            x: 0.6, y: 0.5, w: 12.0, h: 0.85,
+            fontSize: 28, color: COLORS.ink,
+            bold: true, fit: 'shrink',
+        });
+        if (slideData.keyMessage) {
+            slide.addText(this.cleanInlineText(slideData.keyMessage), {
+                x: 0.6, y: 1.4, w: 12.0, h: 0.35,
+                fontSize: 13, color: COLORS.muted, fit: 'shrink',
+            });
+        }
+
         const columns = this.buildComparisonColumns(slideData);
-        this.addComparisonColumn(slide, 0.92, columns.leftTitle, columns.leftItems, COLORS.accentSoft);
-        this.addComparisonColumn(slide, 6.78, columns.rightTitle, columns.rightItems, COLORS.violetSoft);
+        const colW = 5.6;
+        const leftX = 0.6;
+        const rightX = 7.0;
+        const startY = 2.0;
+
+        // Column A title (blue capsule)
+        slide.addShape('roundRect', {
+            x: leftX, y: startY, w: 0.8, h: 0.42,
+            rectRadius: 0.06,
+            line: { color: COLORS.accent, transparency: 100 },
+            fill: { color: COLORS.accentLight, transparency: 0 },
+        });
+        slide.addText('A', {
+            x: leftX, y: startY, w: 0.8, h: 0.42,
+            fontSize: 16, color: COLORS.accent,
+            bold: true, align: 'center', valign: 'middle',
+        });
+        slide.addText(columns.leftTitle, {
+            x: leftX + 0.95, y: startY, w: colW - 1.0, h: 0.42,
+            fontSize: 16, color: COLORS.ink, bold: true, fit: 'shrink', valign: 'middle',
+        });
+
+        // Column B title (violet capsule)
+        slide.addShape('roundRect', {
+            x: rightX, y: startY, w: 0.8, h: 0.42,
+            rectRadius: 0.06,
+            line: { color: COLORS.violet, transparency: 100 },
+            fill: { color: COLORS.violetSoft, transparency: 0 },
+        });
+        slide.addText('B', {
+            x: rightX, y: startY, w: 0.8, h: 0.42,
+            fontSize: 16, color: COLORS.violet,
+            bold: true, align: 'center', valign: 'middle',
+        });
+        slide.addText(columns.rightTitle, {
+            x: rightX + 0.95, y: startY, w: colW - 1.0, h: 0.42,
+            fontSize: 16, color: COLORS.ink, bold: true, fit: 'shrink', valign: 'middle',
+        });
+
+        // Center divider
+        slide.addShape('rect', {
+            x: 6.55, y: startY + 0.6, w: 0.03, h: 4.0,
+            line: { color: COLORS.panelSoft, transparency: 100 },
+            fill: { color: COLORS.panelSoft, transparency: 0 },
+        });
+
+        // Left items with blue dots
+        columns.leftItems.slice(0, 5).forEach((item, i) => {
+            const y = startY + 0.7 + i * 0.72;
+            slide.addShape('ellipse', {
+                x: leftX + 0.05, y: y + 0.15, w: 0.14, h: 0.14,
+                line: { color: COLORS.accent, transparency: 100 },
+                fill: { color: COLORS.accent, transparency: 0 },
+            });
+            slide.addText(item, {
+                x: leftX + 0.35, y, w: colW - 0.4, h: 0.5,
+                fontSize: 13, color: COLORS.slate,
+                fit: 'shrink', valign: 'middle',
+            });
+        });
+
+        // Right items with violet dots
+        columns.rightItems.slice(0, 5).forEach((item, i) => {
+            const y = startY + 0.7 + i * 0.72;
+            slide.addShape('ellipse', {
+                x: rightX + 0.05, y: y + 0.15, w: 0.14, h: 0.14,
+                line: { color: COLORS.violet, transparency: 100 },
+                fill: { color: COLORS.violet, transparency: 0 },
+            });
+            slide.addText(item, {
+                x: rightX + 0.35, y, w: colW - 0.4, h: 0.5,
+                fontSize: 13, color: COLORS.slate,
+                fit: 'shrink', valign: 'middle',
+            });
+        });
     }
 
     private addProcessSlide(slide: pptxgen.Slide, slideData: SlideContent): void {
@@ -606,90 +723,142 @@ export class PPTService {
     }
 
     private addSummarySlide(slide: pptxgen.Slide, slideData: SlideContent, brief?: DeckBrief): void {
-        this.addLightBackground(slide);
-        this.addStandardHeader(slide, slideData, this.getRoleTagLabel('summary', slideData), COLORS.accent);
+        // Dark gradient background matching HTML summary-slide
+        slide.background = { color: COLORS.ink };
+        slide.addShape('rect', {
+            x: 0, y: 0, w: SLIDE_WIDTH, h: SLIDE_HEIGHT,
+            line: { color: '1E293B', transparency: 100 },
+            fill: { color: '1E293B', transparency: 50 },
+        });
+        // Radial accent glow
+        slide.addShape('ellipse', {
+            x: 6.0, y: -1.0, w: 7.0, h: 5.0,
+            line: { color: COLORS.accent, transparency: 100 },
+            fill: { color: COLORS.accent, transparency: 90 },
+        });
 
-        const cards = this.deduplicateBullets(
-            slideData.bullets.length > 0 ? slideData.bullets : brief?.coreTakeaways || [],
-        ).slice(0, 4);
         const isCjk = this.isMostlyCjk(this.collectSlideLanguageSeed(slideData));
 
+        // SUMMARY badge (green)
+        slide.addText(isCjk ? '\u6838\u5FC3\u603B\u7ED3' : 'SUMMARY', {
+            x: 0.75, y: 0.65, w: 2.5, h: 0.3,
+            fontSize: 11, color: COLORS.success,
+            bold: true, charSpacing: 3,
+        });
+
+        // Title
+        slide.addText(slideData.title, {
+            x: 0.75, y: 1.1, w: 11.5, h: 0.85,
+            fontSize: 30, color: COLORS.white,
+            bold: true, fit: 'shrink',
+        });
+
+        // Key message
+        if (slideData.keyMessage) {
+            slide.addText(this.cleanInlineText(slideData.keyMessage), {
+                x: 0.75, y: 2.0, w: 11.5, h: 0.4,
+                fontSize: 16, color: 'B0BEC5', fit: 'shrink',
+            });
+        }
+
+        // Items with check marks in semi-transparent cards
+        const cards = this.deduplicateBullets(
+            slideData.bullets.length > 0 ? slideData.bullets : brief?.coreTakeaways || [],
+        ).slice(0, 6);
+
+        const startY = slideData.keyMessage ? 2.65 : 2.2;
         cards.forEach((item, index) => {
-            const col = index % 2;
-            const row = Math.floor(index / 2);
-            const x = 0.92 + col * 5.95;
-            const y = 2.18 + row * 1.82;
+            const y = startY + index * 0.72;
+
+            // Semi-transparent card
             slide.addShape('roundRect', {
-                x,
-                y,
-                w: 5.48,
-                h: 1.38,
-                line: { color: COLORS.line, transparency: 28 },
-                fill: { color: index % 2 === 0 ? COLORS.panel : COLORS.panelSoft, transparency: 10 },
+                x: 0.75, y, w: 11.5, h: 0.58,
+                rectRadius: 0.1,
+                line: { color: COLORS.white, width: 0.5, transparency: 92 },
+                fill: { color: COLORS.white, transparency: 96 },
             });
-            slide.addText(isCjk ? `要点 ${index + 1}` : `Takeaway ${index + 1}`, {
-                x: x + 0.24,
-                y: y + 0.18,
-                w: 1.1,
-                h: 0.16,
-                fontSize: 10,
-                color: COLORS.accentDark,
-                bold: true,
+
+            // Check icon
+            slide.addText('\u2713', {
+                x: 0.95, y, w: 0.4, h: 0.58,
+                fontSize: 16, color: COLORS.success,
+                bold: true, align: 'center', valign: 'middle',
             });
+
+            // Item text
             slide.addText(item, {
-                x: x + 0.22,
-                y: y + 0.48,
-                w: 5.0,
-                h: 0.62,
-                fontSize: 16,
-                color: COLORS.ink,
-                fit: 'shrink',
-                valign: 'middle',
+                x: 1.45, y, w: 10.5, h: 0.58,
+                fontSize: 15, color: 'D9E2EC',
+                fit: 'shrink', valign: 'middle',
             });
         });
     }
 
     private addNextStepSlide(slide: pptxgen.Slide, slideData: SlideContent): void {
-        this.addLightBackground(slide);
-        this.addStandardHeader(slide, slideData, this.getRoleTagLabel('next_step', slideData), COLORS.success);
+        // Dark gradient background matching HTML
+        slide.background = { color: COLORS.ink };
+        slide.addShape('rect', {
+            x: 0, y: 0, w: SLIDE_WIDTH, h: SLIDE_HEIGHT,
+            line: { color: '1E293B', transparency: 100 },
+            fill: { color: '1E293B', transparency: 50 },
+        });
+        slide.addShape('ellipse', {
+            x: 6.0, y: -1.0, w: 7.0, h: 5.0,
+            line: { color: COLORS.accent, transparency: 100 },
+            fill: { color: COLORS.accent, transparency: 90 },
+        });
 
-        const actions = this.deduplicateBullets(slideData.bullets).slice(0, 5);
+        const isCjk = this.isMostlyCjk(this.collectSlideLanguageSeed(slideData));
+
+        // NEXT STEPS badge (amber)
+        slide.addText(isCjk ? '\u4E0B\u4E00\u6B65' : 'NEXT STEPS', {
+            x: 0.75, y: 0.65, w: 2.5, h: 0.3,
+            fontSize: 11, color: COLORS.amber,
+            bold: true, charSpacing: 3,
+        });
+
+        // Title
+        slide.addText(slideData.title, {
+            x: 0.75, y: 1.1, w: 11.5, h: 0.85,
+            fontSize: 30, color: COLORS.white,
+            bold: true, fit: 'shrink',
+        });
+
+        // Key message
+        if (slideData.keyMessage) {
+            slide.addText(this.cleanInlineText(slideData.keyMessage), {
+                x: 0.75, y: 2.0, w: 11.5, h: 0.4,
+                fontSize: 16, color: 'B0BEC5', fit: 'shrink',
+            });
+        }
+
+        // Action items with arrows in semi-transparent cards
+        const actions = this.deduplicateBullets(slideData.bullets).slice(0, 6);
+        const startY = slideData.keyMessage ? 2.65 : 2.2;
+
         actions.forEach((item, index) => {
-            const y = 1.98 + index * 0.9;
+            const y = startY + index * 0.72;
+
+            // Semi-transparent card
             slide.addShape('roundRect', {
-                x: 1.08,
-                y,
-                w: 11.1,
-                h: 0.62,
-                line: { color: COLORS.line, transparency: 35 },
-                fill: { color: index % 2 === 0 ? COLORS.panel : COLORS.successSoft, transparency: 12 },
+                x: 0.75, y, w: 11.5, h: 0.58,
+                rectRadius: 0.1,
+                line: { color: COLORS.white, width: 0.5, transparency: 92 },
+                fill: { color: COLORS.white, transparency: 96 },
             });
-            slide.addShape('roundRect', {
-                x: 1.28,
-                y: y + 0.1,
-                w: 0.58,
-                h: 0.42,
-                line: { color: COLORS.success, transparency: 100 },
-                fill: { color: COLORS.success, transparency: 0 },
+
+            // Arrow icon
+            slide.addText('\u2192', {
+                x: 0.95, y, w: 0.4, h: 0.58,
+                fontSize: 16, color: COLORS.amber,
+                bold: true, align: 'center', valign: 'middle',
             });
-            slide.addText(String(index + 1), {
-                x: 1.49,
-                y: y + 0.18,
-                w: 0.15,
-                h: 0.14,
-                fontSize: 11,
-                color: COLORS.white,
-                bold: true,
-                align: 'center',
-            });
+
+            // Item text
             slide.addText(item, {
-                x: 2.02,
-                y: y + 0.14,
-                w: 9.82,
-                h: 0.26,
-                fontSize: 15,
-                color: COLORS.ink,
-                fit: 'shrink',
+                x: 1.45, y, w: 10.5, h: 0.58,
+                fontSize: 15, color: 'D9E2EC',
+                fit: 'shrink', valign: 'middle',
             });
         });
     }
@@ -771,77 +940,118 @@ export class PPTService {
 
     private addContentSlide(slide: pptxgen.Slide, slideData: SlideContent, config: PptRenderConfig): void {
         const heroImage = slideData.images[0];
-        const useImagePanel = Boolean(heroImage && config.templateStyle);
+        const hasImage = Boolean(heroImage && config.templateStyle);
+        const bullets = this.deduplicateBullets(slideData.bullets);
 
+        // Light background
         this.addLightBackground(slide);
-        if (useImagePanel) {
-            this.addImage(slide, heroImage!, 7.2, 0.86, 5.15, 5.82);
-            slide.addShape('roundRect', {
-                x: 7.2,
-                y: 0.86,
-                w: 5.15,
-                h: 5.82,
-                line: { color: COLORS.white, transparency: 100 },
-                fill: { color: COLORS.ink, transparency: 72 },
-            });
-        }
 
-        this.addSectionTag(slide, this.getRoleTagLabel('content', slideData), COLORS.accent, 0.85, 0.62, 1.35, false);
-        if (slideData.breadcrumb) {
-            slide.addText(slideData.breadcrumb, {
-                x: 0.88,
-                y: 1.05,
-                w: 5.7,
-                h: 0.18,
-                fontSize: 10,
-                color: COLORS.muted,
-                fit: 'shrink',
-            });
-        }
-
-        slide.addText(slideData.title, {
-            x: 0.86,
-            y: 1.34,
-            w: useImagePanel ? 5.9 : 11.5,
-            h: 0.8,
-            fontSize: 22,
-            color: COLORS.ink,
-            bold: true,
-            fit: 'shrink',
+        // Top progress bar
+        const accentHue = COLORS.accent;
+        slide.addShape('rect', {
+            x: 0, y: 0, w: SLIDE_WIDTH, h: 0.06,
+            line: { color: COLORS.panelSoft, transparency: 100 },
+            fill: { color: COLORS.panelSoft, transparency: 0 },
+        });
+        slide.addShape('rect', {
+            x: 0, y: 0, w: SLIDE_WIDTH * 0.3, h: 0.06,
+            line: { color: accentHue, transparency: 100 },
+            fill: { color: accentHue, transparency: 0 },
         });
 
+        // Page number (top-right)
+        const pageInfo = slideData.sourceIndex !== undefined ? slideData.sourceIndex : 0;
+        slide.addText(`${String(pageInfo + 1).padStart(2, '0')}`, {
+            x: 11.6, y: 0.22, w: 0.6, h: 0.22,
+            fontSize: 11, color: COLORS.muted, align: 'right',
+        });
+
+        // Title (large, bold)
+        const contentW = hasImage ? 6.8 : 11.5;
+        slide.addText(slideData.title, {
+            x: 0.6, y: 0.55, w: contentW, h: 0.85,
+            fontSize: 28, color: COLORS.ink,
+            bold: true, fit: 'shrink', valign: 'middle',
+        });
+
+        // Key message with left border decoration
         const keyMessage = this.cleanInlineText(slideData.keyMessage || slideData.summary || '');
         if (keyMessage) {
+            slide.addShape('rect', {
+                x: 0.6, y: 1.55, w: 0.05, h: 0.5,
+                line: { color: COLORS.line, transparency: 100 },
+                fill: { color: COLORS.line, transparency: 0 },
+            });
             slide.addText(keyMessage, {
-                x: 0.9,
-                y: 2.16,
-                w: useImagePanel ? 5.9 : 11.5,
-                h: 0.55,
-                fontSize: 14,
-                color: COLORS.accentDark,
-                bold: true,
-                fit: 'shrink',
+                x: 0.82, y: 1.55, w: contentW - 0.22, h: 0.5,
+                fontSize: 13, color: COLORS.muted,
+                fit: 'shrink', valign: 'middle',
             });
         }
 
-        slide.addShape('roundRect', {
-            x: 0.84,
-            y: 2.92,
-            w: useImagePanel ? 5.9 : 11.55,
-            h: 3.36,
-            line: { color: COLORS.line, transparency: 28 },
-            fill: { color: COLORS.panel, transparency: 0 },
-        });
-        slide.addText(this.buildBodyRows(slideData, true), {
-            x: 1.08,
-            y: 3.3,
-            w: useImagePanel ? 5.35 : 10.95,
-            h: 2.7,
-            fontSize: 15,
-            color: COLORS.ink,
-            fit: 'shrink',
-            valign: 'top',
-        });
+        // Card-style bullets
+        const bulletStartY = keyMessage ? 2.25 : 1.65;
+        const maxBullets = Math.min(bullets.length, 6);
+        const bulletCardH = 0.52;
+        const bulletGap = 0.12;
+
+        for (let i = 0; i < maxBullets; i++) {
+            const normalized = this.normalizeBullet(bullets[i]);
+            const y = bulletStartY + i * (bulletCardH + bulletGap);
+
+            // Card background
+            slide.addShape('roundRect', {
+                x: 0.6, y, w: contentW, h: bulletCardH,
+                rectRadius: 0.08,
+                line: { color: 'F1F5F9', transparency: 0 },
+                fill: { color: COLORS.white, transparency: 0 },
+            });
+
+            // Numbered marker
+            slide.addShape('roundRect', {
+                x: 0.72, y: y + 0.08, w: 0.36, h: 0.36,
+                rectRadius: 0.06,
+                line: { color: COLORS.accent, transparency: 100 },
+                fill: { color: COLORS.accent, transparency: 0 },
+            });
+            slide.addText(String(i + 1), {
+                x: 0.72, y: y + 0.08, w: 0.36, h: 0.36,
+                fontSize: 12, color: COLORS.white,
+                bold: true, align: 'center', valign: 'middle',
+            });
+
+            // Bullet text
+            slide.addText(normalized.text, {
+                x: 1.22, y: y + 0.06, w: contentW - 0.8, h: bulletCardH - 0.12,
+                fontSize: 13, color: COLORS.slate,
+                fit: 'shrink', valign: 'middle',
+            });
+        }
+
+        // Right side: image or accent decoration block
+        if (hasImage) {
+            this.addImage(slide, heroImage!, 7.8, 0.6, 5.0, 6.0);
+            // Subtle overlay
+            slide.addShape('rect', {
+                x: 7.8, y: 6.2, w: 5.0, h: 0.4,
+                line: { color: COLORS.ink, transparency: 100 },
+                fill: { color: COLORS.ink, transparency: 80 },
+            });
+        } else if (bullets.length > 0) {
+            // Decorative accent block (no image)
+            slide.addShape('roundRect', {
+                x: 9.5, y: 2.0, w: 2.8, h: 2.8,
+                rectRadius: 0.2,
+                line: { color: COLORS.accentSoft, transparency: 100 },
+                fill: { color: COLORS.accentSoft, transparency: 40 },
+            });
+            slide.addText('\u2726', {
+                x: 9.5, y: 2.0, w: 2.8, h: 2.8,
+                fontSize: 48, color: COLORS.accent,
+                align: 'center', valign: 'middle',
+                transparency: 60,
+            });
+        }
     }
 
     private addFooter(
@@ -852,7 +1062,8 @@ export class PPTService {
         config: PptRenderConfig,
         role: SlideRole,
     ): void {
-        const darkMode = role === 'section_divider' || role === 'key_insight' || role === 'data_highlight';
+        const darkMode = role === 'section_divider' || role === 'key_insight' || role === 'data_highlight'
+            || role === 'agenda' || role === 'timeline' || role === 'summary' || role === 'next_step';
         const footerColor = darkMode ? COLORS.white : COLORS.muted;
         const pageFill = darkMode ? COLORS.white : COLORS.ink;
         const pageText = darkMode ? COLORS.ink : COLORS.white;
@@ -1004,41 +1215,27 @@ export class PPTService {
 
     private addLightBackground(slide: pptxgen.Slide): void {
         slide.background = { color: COLORS.paper };
-        slide.addShape('roundRect', {
-            x: 9.4,
-            y: -0.82,
-            w: 4.2,
-            h: 3.0,
-            line: { color: COLORS.accentSoft, transparency: 100 },
-            fill: { color: COLORS.accentSoft, transparency: 38 },
-        });
-        slide.addShape('roundRect', {
-            x: -0.72,
-            y: 5.18,
-            w: 4.0,
-            h: 2.8,
-            line: { color: COLORS.panelSoft, transparency: 100 },
-            fill: { color: COLORS.panelSoft, transparency: 28 },
-        });
     }
 
     private addDarkBackground(slide: pptxgen.Slide): void {
         slide.background = { color: COLORS.ink };
-        slide.addShape('roundRect', {
-            x: 8.85,
-            y: -0.92,
-            w: 4.6,
-            h: 3.2,
+        // Radial gradient simulation: accent glow top-right
+        slide.addShape('ellipse', {
+            x: 1.5,
+            y: -1.5,
+            w: 6.0,
+            h: 5.0,
             line: { color: COLORS.accent, transparency: 100 },
-            fill: { color: COLORS.accent, transparency: 74 },
+            fill: { color: COLORS.accent, transparency: 85 },
         });
-        slide.addShape('roundRect', {
-            x: -0.9,
-            y: 4.95,
-            w: 4.45,
-            h: 3.05,
-            line: { color: COLORS.accentDark, transparency: 100 },
-            fill: { color: COLORS.accentDark, transparency: 68 },
+        // Violet glow right
+        slide.addShape('ellipse', {
+            x: 8.0,
+            y: -1.0,
+            w: 5.0,
+            h: 4.0,
+            line: { color: COLORS.violet, transparency: 100 },
+            fill: { color: COLORS.violet, transparency: 88 },
         });
     }
 
