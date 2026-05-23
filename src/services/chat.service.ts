@@ -1,4 +1,4 @@
-import axios from 'axios';
+import OpenAI from 'openai';
 import { DocumentData } from '../types';
 
 export interface ChatMessage {
@@ -31,10 +31,19 @@ export interface OutlineData {
 export class ChatService {
     private apiKey: string | undefined;
     private baseUrl: string;
+    private model: string;
+    private client: OpenAI | null;
 
     constructor() {
-        this.apiKey = process.env.PLANNER_AUTH_TOKEN || process.env.IMAGE_API_KEY; 
-        this.baseUrl = process.env.PLANNER_API_BASE_URL || process.env.IMAGE_API_BASE_URL || 'https://www.aigenimage.cn';
+        this.apiKey = process.env.OPENAI_API_KEY;
+        this.baseUrl = process.env.OPENAI_BASE_URL || 'https://api.apiyi.com/v1';
+        this.model = process.env.OPENAI_CHAT_MODEL || process.env.PLANNER_MODEL || 'gpt-4.1';
+        this.client = this.apiKey
+            ? new OpenAI({
+                  apiKey: this.apiKey,
+                  baseURL: this.baseUrl,
+              })
+            : null;
     }
 
     async chatAndGenerate(messages: ChatMessage[], userText: string = '', docContent: string = ''): Promise<ChatResponse> {
@@ -44,11 +53,9 @@ export class ChatService {
         const systemContent = this.buildSystemPrompt(phase, docContent);
 
         let promptString: string;
-        
+
         if (phase === 'outline') {
-            // outline 阶段：构建聚焦 prompt，不传原始对话历史
             const requirementsSummary = this.extractRequirements(messages, userText, docContent);
-            // 用 response priming 技巧：在 prompt 末尾预填回复开头，引导 LLM 进入输出模式
             promptString = `${systemContent}\n\n---\n以下是客户已提供的需求信息：\n${requirementsSummary}\n\n---\n现在请你根据以上信息，直接输出PPT大纲的JSON。\n\n好的，根据您的需求，我为您设计了以下PPT大纲：\n\n\`\`\`json\n`;
         } else {
             const systemPrompt: ChatMessage = { role: 'system', content: systemContent };
@@ -60,42 +67,25 @@ export class ChatService {
         }
 
         try {
-            const response = await axios.post(
-                `${this.baseUrl}/api/llm/direct`,
-                {
-                    model: process.env.PLANNER_MODEL || 'gemini-3.1-pro-preview',
-                    prompt: promptString,
-                    temperature: 0.7,
-                    stream: false
-                },
-                {
-                    headers: {
-                        'Content-Type': 'application/json',
-                        ...(this.apiKey && { Authorization: `Bearer ${this.apiKey}` }),
-                    },
-                    timeout: 60000,
-                    validateStatus: () => true,
-                }
-            );
-
-            if (response.status !== 200 || response.data?.success === false) {
-                console.error(`LLM API failed: status=${response.status}, message=${response.data?.message || 'unknown'}`);
-                throw new Error('API return error');
+            if (!this.client) {
+                throw new Error('Missing OPENAI_API_KEY');
             }
 
-            let replyContent = '';
-            const payload = response.data;
-            if (typeof payload.data === 'string') replyContent = payload.data;
-            else if (payload.data?.choices?.[0]?.text) replyContent = payload.data.choices[0].text;
-            else if (payload.data?.choices?.[0]?.message?.content) replyContent = payload.data.choices[0].message.content;
-            else if (payload.data?.reply) replyContent = String(payload.data.reply);
-            else if (payload.data?.text) replyContent = String(payload.data.text);
-            else if (payload.data?.content) replyContent = String(payload.data.content);
-            else replyContent = JSON.stringify(payload);
+            const response = await this.client.chat.completions.create({
+                model: this.model,
+                messages: [{ role: 'user', content: promptString }],
+                temperature: phase === 'gathering' ? 0.7 : 0.3,
+                stream: false,
+            });
+
+            const replyContent = response.choices[0]?.message?.content || '';
+            if (!replyContent) {
+                throw new Error('Empty completion content');
+            }
 
             return this.parseResponse(replyContent, phase);
         } catch (error: any) {
-            console.error('LLM Chat Error:', error.response?.data || error.message);
+            console.error('LLM Chat Error:', error?.response?.data || error?.message || error);
             throw new Error('与AI助手通信失败，请稍后再试。');
         }
     }
@@ -109,6 +99,7 @@ export class ChatService {
     private detectPhase(messages: ChatMessage[], userText: string, docContent: string = ''): 'gathering' | 'outline' | 'confirmed' {
         // 用户明确确认大纲的信号
         const confirmPatterns = /确认生成|开始生成|就这样生成|可以生成|没问题.*生成|同意.*生成|好的.*生成|确认大纲|大纲没问题|大纲可以|就按这个|按这个生成/i;
+        const directGeneratePatterns = /生成.*ppt|直接生成|开始做ppt|输出ppt|生成演示文稿/i;
         
         // 检查历史中是否已经出过大纲（assistant 消息中含有 ```outline 标记）
         const hasOutline = messages.some(m => 
@@ -116,6 +107,10 @@ export class ChatService {
         );
 
         if (hasOutline && confirmPatterns.test(userText)) {
+            return 'confirmed';
+        }
+
+        if (docContent && directGeneratePatterns.test(userText)) {
             return 'confirmed';
         }
 

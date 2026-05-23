@@ -97,6 +97,7 @@ app.post('/api/chat', upload.array('files', 5), async (req: any, res: any) => {
         const docOrderedImages: string[] = []; // 按顺序收集所有图片
         // 用于缓存的 key（文档文件名）
         let imageCacheKey = '';
+        let primaryParsedDoc: DocumentData | null = null;
         
         if (files && files.length > 0) {
             console.log('Processing uploaded files...');
@@ -133,6 +134,7 @@ app.post('/api/chat', upload.array('files', 5), async (req: any, res: any) => {
             
             if (parsedDocs.length > 0) {
                 const primaryDoc = parsedDocs[0];
+                primaryParsedDoc = primaryDoc;
                 docContent = `\n\n=== 用户上传的文档内容 ===\n文档标题: ${primaryDoc.title}\n`;
                 parsedDocs.forEach((doc, idx) => {
                     if (idx > 0) docContent += `\n--- 文档 ${idx + 1} ---\n`;
@@ -184,7 +186,34 @@ app.post('/api/chat', upload.array('files', 5), async (req: any, res: any) => {
             }
         }
 
-        const chatResponse = await chatService.chatAndGenerate(messages, text, docContent);
+        let chatResponse;
+        try {
+            chatResponse = await chatService.chatAndGenerate(messages, text, docContent);
+        } catch (chatError: any) {
+            console.warn('Chat service failed, switching to local fallback:', chatError?.message || chatError);
+
+            if (primaryParsedDoc) {
+                const fallbackFocus =
+                    /流程|步骤|阶段|process/i.test(text) || primaryParsedDoc.title.includes('流程') ? 'process' : undefined;
+                const fallbackAudience = /技术|识别|算法|模型|工程/i.test(text + primaryParsedDoc.title) ? 'technical' : undefined;
+
+                const fallbackDoc = await plannerService.planDocument(primaryParsedDoc, {
+                    focus: fallbackFocus,
+                    audience: fallbackAudience,
+                    style: 'professional',
+                    deckFormat: 'presenter',
+                });
+
+                chatResponse = {
+                    reply: 'AI 对话服务暂时不可用，已切换为本地兜底生成模式，正在根据上传文档直接生成 PPT。',
+                    pptData: fallbackDoc,
+                };
+            } else {
+                chatResponse = {
+                    reply: 'AI 对话服务暂时不可用。请重新上传文档，我会直接为您生成 PPT。',
+                };
+            }
+        }
 
         let downloadUrl = undefined;
 

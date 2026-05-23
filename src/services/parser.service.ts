@@ -134,9 +134,13 @@ export class ParserService {
     }
 
     async parsePdf(filePath: string): Promise<DocumentData> {
-        const pdfParse = this.loadPdfParse();
+        const PDFParse = this.loadPdfParse();
         const dataBuffer = fs.readFileSync(filePath);
-        const data = await (pdfParse as any)(dataBuffer);
+        const parser = new PDFParse({ data: dataBuffer });
+        const data = await parser.getText();
+        if (typeof parser.destroy === 'function') {
+            await parser.destroy();
+        }
 
         const sections = data.text
             .split(/\n{2,}/)
@@ -172,7 +176,19 @@ export class ParserService {
         try {
             // eslint-disable-next-line @typescript-eslint/no-var-requires
             const mod = require('pdf-parse');
-            return mod.default || mod;
+            if (typeof mod?.PDFParse === 'function') {
+                return mod.PDFParse;
+            }
+            if (typeof mod?.default?.PDFParse === 'function') {
+                return mod.default.PDFParse;
+            }
+            if (typeof mod?.default === 'function') {
+                return mod.default;
+            }
+            if (typeof mod === 'function') {
+                return mod;
+            }
+            throw new Error(`Unsupported pdf-parse export shape: ${Object.keys(mod || {}).join(', ')}`);
         } catch (error) {
             throw new Error(
                 `PDF parser init failed. Please use a newer Node.js runtime (recommended >=16). Raw error: ${
