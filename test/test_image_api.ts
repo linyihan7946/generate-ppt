@@ -8,11 +8,13 @@ dotenv.config({ path: path.resolve(__dirname, '../.env') });
 async function testImageGeneration() {
     console.log('Testing Image Generation API...');
 
-    // Check if API key is present
-    if (!process.env.IMAGE_API_KEY) {
-        console.warn('Warning: IMAGE_API_KEY is not set in .env file.');
+    const hasOpenAiKey = Boolean(process.env.OPENAI_API_KEY);
+    const hasLegacyKey = Boolean(process.env.IMAGE_API_KEY);
+
+    if (!hasOpenAiKey && !hasLegacyKey) {
+        console.warn('Warning: neither OPENAI_API_KEY nor IMAGE_API_KEY is set.');
     } else {
-        console.log('IMAGE_API_KEY is set.');
+        console.log(`Configured provider: ${hasOpenAiKey ? 'OPENAI /images/edits' : 'legacy direct-edit'}`);
     }
 
     const imageService = new ImageService();
@@ -30,7 +32,8 @@ async function testImageGeneration() {
 
         if (imageUrl) {
             console.log('[OK] Image generation successful!');
-            console.log('Image URL:', imageUrl);
+            console.log('Image preview:', imageUrl.slice(0, 80) + '...');
+            console.log('Payload length:', imageUrl.length);
             console.log(`Time taken: ${(endTime - startTime) / 1000} seconds`);
         } else {
             console.error('[FAIL] Image generation failed. No URL returned.');

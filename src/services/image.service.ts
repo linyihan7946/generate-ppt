@@ -1,15 +1,29 @@
 import axios from 'axios';
+import FormData from 'form-data';
 import { SlideContent } from '../types';
 
 export class ImageService {
-    private apiKey: string | undefined;
-    private baseUrl: string;
+    private openAiApiKey: string | undefined;
+    private openAiBaseUrl: string;
+    private openAiModel: string;
+    private legacyApiKey: string | undefined;
+    private legacyBaseUrl: string;
+    private imageResolution: string;
+    private imageAspectRatio: string;
     private cache = new Map<string, string>();
 
     constructor() {
-        this.apiKey = process.env.IMAGE_API_KEY;
-        this.baseUrl = process.env.IMAGE_API_BASE_URL || 'https://www.aigenimage.cn';
-        console.log('ImageService initialized with baseUrl:', this.baseUrl);
+        this.openAiApiKey = process.env.OPENAI_API_KEY;
+        this.openAiBaseUrl = (process.env.OPENAI_BASE_URL || 'https://api.apiyi.com/v1').replace(/\/$/, '');
+        this.openAiModel = process.env.OPENAI_IMAGE_MODEL || process.env.IMAGE_MODEL || 'gpt-image-2-all';
+        this.legacyApiKey = process.env.IMAGE_API_KEY;
+        this.legacyBaseUrl = process.env.IMAGE_API_BASE_URL || 'https://www.aigenimage.cn';
+        this.imageResolution = process.env.IMAGE_RESOLUTION || '2K';
+        this.imageAspectRatio = process.env.IMAGE_ASPECT_RATIO || '16:9';
+        console.log(
+            'ImageService initialized with provider:',
+            this.openAiApiKey ? 'openai-images-edits' : 'legacy-direct-edit',
+        );
     }
 
     async enrichSlidesWithGeneratedImages(slides: SlideContent[], concurrency = 2): Promise<void> {
@@ -57,22 +71,87 @@ export class ImageService {
     }
 
     private async generateByPrimaryApi(prompt: string): Promise<string | null> {
+        const openAiImage = await this.generateByOpenAiEditApi(prompt);
+        if (openAiImage) {
+            return openAiImage;
+        }
+
+        return this.generateByLegacyApi(prompt);
+    }
+
+    private async generateByOpenAiEditApi(prompt: string): Promise<string | null> {
+        if (!this.openAiApiKey) {
+            return null;
+        }
+
+        try {
+            const form = new FormData();
+            form.append('model', this.openAiModel);
+            form.append('prompt', this.buildOpenAiPrompt(prompt));
+            form.append('n', '1');
+            form.append('response_format', 'b64_json');
+            form.append('size', this.mapOpenAiSize(this.imageAspectRatio));
+            form.append('image', this.buildEditSeedBuffer(), {
+                filename: 'ppt-seed.png',
+                contentType: 'image/png',
+            });
+
+            const response = await axios.post(`${this.openAiBaseUrl}/images/edits`, form, {
+                headers: {
+                    ...form.getHeaders(),
+                    Authorization: `Bearer ${this.openAiApiKey}`,
+                },
+                timeout: 180000,
+                maxBodyLength: Infinity,
+                maxContentLength: Infinity,
+                proxy: false,
+            });
+
+            const rawResult = response.data?.data?.data?.[0];
+            const imagePayload =
+                typeof rawResult === 'string'
+                    ? rawResult
+                    : rawResult?.url || rawResult?.b64_json || rawResult?.base64;
+
+            if (!imagePayload) {
+                const openAiResult = response.data?.data?.[0];
+                const openAiPayload =
+                    openAiResult?.b64_json || openAiResult?.url || openAiResult?.base64 || openAiResult;
+                return typeof openAiPayload === 'string' ? this.normalizeImagePayload(openAiPayload) : null;
+            }
+
+            return await this.normalizeImagePayload(imagePayload);
+        } catch (error: any) {
+            console.error('OpenAI image edits API failed:', error?.message || error);
+            if (error?.response?.data) {
+                console.error(
+                    'OpenAI image edits API response:',
+                    typeof error.response.data === 'string'
+                        ? error.response.data.slice(0, 500)
+                        : JSON.stringify(error.response.data).slice(0, 500),
+                );
+            }
+            return null;
+        }
+    }
+
+    private async generateByLegacyApi(prompt: string): Promise<string | null> {
         try {
             const headers: Record<string, string> = {
                 'Content-Type': 'application/json',
             };
 
-            if (this.apiKey) {
-                headers.Authorization = `Bearer ${this.apiKey}`;
+            if (this.legacyApiKey) {
+                headers.Authorization = `Bearer ${this.legacyApiKey}`;
             }
 
             const response = await axios.post(
-                `${this.baseUrl}/api/image/direct-edit`,
+                `${this.legacyBaseUrl}/api/image/direct-edit`,
                 {
                     prompt,
-                    model: 'gemini-3.1-flash-image-preview',
-                    aspect_ratio: '16:9',
-                    resolution: '2K',
+                    model: process.env.IMAGE_MODEL || 'gemini-3.1-flash-image-preview',
+                    aspect_ratio: this.imageAspectRatio,
+                    resolution: this.imageResolution,
                 },
                 {
                     headers,
@@ -93,9 +172,9 @@ export class ImageService {
 
             return await this.normalizeImagePayload(imagePayload);
         } catch (error: any) {
-            console.error('Primary image API failed:', error?.message || error);
+            console.error('Legacy image API failed:', error?.message || error);
             if (error?.response?.data) {
-                console.error('Primary image API response:', JSON.stringify(error.response.data));
+                console.error('Legacy image API response:', JSON.stringify(error.response.data));
             }
             return null;
         }
@@ -175,6 +254,36 @@ export class ImageService {
         ]
             .filter(Boolean)
             .join(' ');
+    }
+
+    private buildOpenAiPrompt(prompt: string): string {
+        return [
+            prompt.trim(),
+            '将输入底图重绘为适合技术讲解 PPT 的 16:9 高清配图。',
+            '画面要现代、专业、信息密度适中，突出主题场景和关键对象。',
+            '不要出现文字、水印、Logo、UI 边框、海报排版、二维码。',
+            '尽量使用干净背景、明确主体、演示文稿风格的构图。',
+        ].join(' ');
+    }
+
+    private mapOpenAiSize(aspectRatio: string): string {
+        const normalized = aspectRatio.trim();
+        if (normalized === '16:9') {
+            return '1536x1024';
+        }
+        if (normalized === '9:16') {
+            return '1024x1536';
+        }
+        return '1024x1024';
+    }
+
+    private buildEditSeedBuffer(): Buffer {
+        return Buffer.from(this.editSeedBase64(), 'base64');
+    }
+
+    private editSeedBase64(): string {
+        // Transparent 1x1 PNG used so the OpenAI edits endpoint can be reused as a pure generation entry.
+        return 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO6WQ9QAAAAASUVORK5CYII=';
     }
 
     private hashPrompt(prompt: string): string {
