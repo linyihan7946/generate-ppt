@@ -46,6 +46,16 @@ export class ChatService {
             : null;
     }
 
+    private containsOutlineSignal(content: string): boolean {
+        const text = content || '';
+        return (
+            text.includes('```outline') ||
+            text.includes('`outline') ||
+            text.includes('以下是为您生成的PPT大纲') ||
+            /^第\d+页/m.test(text)
+        );
+    }
+
     async chatAndGenerate(messages: ChatMessage[], userText: string = '', docContent: string = ''): Promise<ChatResponse> {
         const phase = this.detectPhase(messages, userText, docContent);
         console.log('Chat phase detected:', phase);
@@ -99,18 +109,11 @@ export class ChatService {
     private detectPhase(messages: ChatMessage[], userText: string, docContent: string = ''): 'gathering' | 'outline' | 'confirmed' {
         // 用户明确确认大纲的信号
         const confirmPatterns = /确认生成|开始生成|就这样生成|可以生成|没问题.*生成|同意.*生成|好的.*生成|确认大纲|大纲没问题|大纲可以|就按这个|按这个生成/i;
-        const directGeneratePatterns = /生成.*ppt|直接生成|开始做ppt|输出ppt|生成演示文稿/i;
         
         // 检查历史中是否已经出过大纲（assistant 消息中含有 ```outline 标记）
-        const hasOutline = messages.some(m => 
-            m.role === 'assistant' && m.content.includes('```outline')
-        );
+        const hasOutline = messages.some((m) => m.role === 'assistant' && this.containsOutlineSignal(m.content));
 
         if (hasOutline && confirmPatterns.test(userText)) {
-            return 'confirmed';
-        }
-
-        if (docContent && directGeneratePatterns.test(userText)) {
             return 'confirmed';
         }
 

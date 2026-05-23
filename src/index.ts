@@ -13,7 +13,7 @@ import { PlannerService } from './services/planner.service';
 import { EvaluatorService } from './services/evaluator.service';
 import { DeckAudience, DeckFocus, DeckFormat, DeckLength, DeckStyle, DocumentData, PlannerMode } from './types';
 
-import { ChatService, ChatMessage } from './services/chat.service';
+import { ChatService, ChatMessage, OutlineData } from './services/chat.service';
 import { PPTImageService } from './services/ppt-image.service';
 
 dotenv.config();
@@ -54,6 +54,7 @@ const pptImageService = new PPTImageService();
 interface ImageCacheEntry {
     titleMap: Map<string, string[]>;  // slideTitle -> images[]
     ordered: string[];                // 按顺序全部图片
+    docData?: DocumentData;
     createdAt: number;
 }
 const docImageCache = new Map<string, ImageCacheEntry>();
@@ -66,6 +67,39 @@ function cleanExpiredImageCache() {
             docImageCache.delete(key);
         }
     }
+}
+
+function hasConfirmedOutline(messages: ChatMessage[], text: string): boolean {
+    const confirmPatterns = /确认生成|开始生成|就这样生成|可以生成|没问题.*生成|同意.*生成|好的.*生成|确认大纲|大纲没问题|大纲可以|就按这个|按这个生成/i;
+    const hasOutline = messages.some((m) => {
+        const content = m.content || '';
+        return (
+            m.role === 'assistant' &&
+            (content.includes('```outline') ||
+                content.includes('`outline') ||
+                content.includes('以下是为您生成的PPT大纲') ||
+                /^第\d+页/m.test(content))
+        );
+    });
+    return hasOutline && confirmPatterns.test(text || '');
+}
+
+function buildOutlineFromDocument(docData: DocumentData): OutlineData {
+    return {
+        title: docData.title || '演示文稿',
+        brief: {
+            deckGoal: `围绕《${docData.title || '文档内容'}》进行结构化讲解`,
+            audience: 'technical',
+            focus: 'process',
+            style: 'professional',
+        },
+        slides: docData.slides.map((slide) => ({
+            title: slide.title || '',
+            slideRole: slide.slideRole || 'content',
+            keyMessage: slide.keyMessage || slide.summary || slide.title || '',
+            bullets: (slide.bullets || []).slice(0, 5),
+        })),
+    };
 }
 
 // 新增对话生成 PPT 接口
@@ -161,6 +195,7 @@ app.post('/api/chat', upload.array('files', 5), async (req: any, res: any) => {
                     docImageCache.set(imageCacheKey, {
                         titleMap: new Map(docOriginalImages),
                         ordered: [...docOrderedImages],
+                        docData: primaryDoc,
                         createdAt: Date.now(),
                     });
                     console.log(`Cached ${docOrderedImages.length} images under key: "${imageCacheKey}"`);
@@ -180,6 +215,9 @@ app.post('/api/chat', upload.array('files', 5), async (req: any, res: any) => {
                         docOriginalImages.set(title, imgs);
                     }
                     docOrderedImages.push(...entry.ordered);
+                    if (!primaryParsedDoc && entry.docData) {
+                        primaryParsedDoc = entry.docData;
+                    }
                     console.log(`Restored ${entry.ordered.length} cached images from key: "${key}"`);
                     break;
                 }
@@ -203,14 +241,20 @@ app.post('/api/chat', upload.array('files', 5), async (req: any, res: any) => {
                     style: 'professional',
                     deckFormat: 'presenter',
                 });
+                const confirmed = hasConfirmedOutline(messages, text);
 
-                chatResponse = {
-                    reply: 'AI 对话服务暂时不可用，已切换为本地兜底生成模式，正在根据上传文档直接生成 PPT。',
-                    pptData: fallbackDoc,
-                };
+                chatResponse = confirmed
+                    ? {
+                          reply: 'AI 对话服务暂时不可用，已切换为本地兜底生成模式，正在根据已确认的大纲生成 PPT。',
+                          pptData: fallbackDoc,
+                      }
+                    : {
+                          reply: 'AI 对话服务暂时不可用，已切换为本地兜底模式。以下是根据文档整理的大纲，请先确认，确认后我再生成 PPT。',
+                          outlineData: buildOutlineFromDocument(fallbackDoc),
+                      };
             } else {
                 chatResponse = {
-                    reply: 'AI 对话服务暂时不可用。请重新上传文档，我会直接为您生成 PPT。',
+                    reply: 'AI 对话服务暂时不可用。请重新上传文档，我会先为您生成大纲，确认后再生成 PPT。',
                 };
             }
         }
