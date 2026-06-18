@@ -1,130 +1,44 @@
-# Document to PPT Generator
+# generate-ppt
 
-Generate PPT from `Word / Markdown / PDF` with a unified pipeline:
+本地技术文档转 PPT 服务。
 
-1. Parse source document while preserving hierarchy
-2. Plan slide narrative with Gemini 3.1 Pro (with strict JSON schema)
-3. Generate slide images
-4. Render PPT using template-style full-screen visuals
-5. Evaluate PPT quality and export score report
+当前内置模板：
 
-## Install
+- 技术类ppt（不生成图片）
 
-```bash
-npm install
+## 启动
+
+双击 `start.bat`，或在命令行运行：
+
+```powershell
+python app.py
 ```
 
-## Environment
+服务启动后会自动打开页面：
 
-Copy `.env.example` to `.env` and configure:
-
-```env
-IMAGE_API_KEY=your_api_key_here
-IMAGE_API_BASE_URL=https://www.aigenimage.cn
-PORT=3000
-
-ENABLE_AI_IMAGES=true
-IMAGE_CONCURRENCY=2
-IMAGE_MODEL=gemini-3.1-flash-image-preview
-IMAGE_RESOLUTION=2K
-
-ENABLE_PLANNER=true
-PLANNER_MODEL=gemini-3.1-pro-preview
-PLANNER_API_BASE_URL=https://www.aigenimage.cn:3001
-PLANNER_AUTH_TOKEN=
-LLM_AUTH_TOKEN=
-PLANNER_USE_WORKER_PROXY=false
-CLOUDFLARE_WORKER_URL=
-LLM_API_KEY=
-GOOGLE_API_KEY=
-AIWORKFLOW_BACKEND_ENV_PATH=
-PLANNER_CONTENT_MODE=strict
-PLANNER_EXPAND_SPARSE_CONTENT=true
-PLANNER_USE_GUEST_LOGIN=false
-ENABLE_EVALUATION=true
-
-PPT_TEMPLATE_STYLE=true
-PPT_KEEP_TEXT=true
-PPT_IMAGE_ONLY_MODE=false
-PPT_MAX_BULLETS_PER_SLIDE=5
+```text
+http://127.0.0.1:8765
 ```
 
-### Planner auth notes
+如果 8765 已被占用，服务会自动使用后续可用端口，并在终端打印实际地址。
 
-- `PLANNER_AUTH_TOKEN` (or `LLM_AUTH_TOKEN`) is used for `/api/llm`.
-- If planner-specific token is empty, the planner will also try `IMAGE_API_KEY`.
-- Worker proxy is disabled by default. Only when `PLANNER_USE_WORKER_PROXY=true` will planner read `CLOUDFLARE_WORKER_URL` + (`LLM_API_KEY` or `GOOGLE_API_KEY`) and call Gemini via worker proxy.
-- The current worker proxy mode still forwards to Google Gemini and therefore still needs a real provider key. If you already use `/api/llm` with `PLANNER_AUTH_TOKEN`, leave `PLANNER_USE_WORKER_PROXY=false`.
-- `AIWORKFLOW_BACKEND_ENV_PATH` is optional and is only read for worker-proxy settings when `PLANNER_USE_WORKER_PROXY=true`.
-- If not provided, planner falls back to local heuristic planning.
-- `PLANNER_USE_GUEST_LOGIN=true` can auto-login guest, but guest accounts may have zero points.
+## 支持输入
 
-### Planner content modes
+- PDF
+- Word `.docx`
+- Markdown `.md`
+- 文本 `.txt`
 
-- `PLANNER_CONTENT_MODE=strict` (default): stay as close as possible to source content and wording.
-- `PLANNER_CONTENT_MODE=creative`: keep slide order and hierarchy, but allow Gemini 3.1 Pro to lightly polish bullets, summaries, and image direction without adding unsupported facts.
-- `PLANNER_EXPAND_SPARSE_CONTENT=true` (default): when a slide is too sparse, planner first fills baseline content and then asks LLM to expand it (worker proxy only when explicitly enabled, otherwise token-based `/api/llm`).
+## 输出特点
 
-### Quality evaluation system
+- 横版 16:9，适合技术讲解录屏
+- 按原文档顺序生成内容
+- 一页一个核心观点
+- 自动生成流程图、关系图、对比图、问题-原因-方案-结果结构
+- 自动预留截图区域
+- 点击逐步淡入动画
+- 不生成 AI 图片，不依赖外部模型
 
-Each generation can output:
+## 新增模板
 
-- `<ppt-name>.quality.json`
-- `<ppt-name>.quality.md`
-
-Scoring dimensions:
-
-- Content logic (hierarchy/transition/title quality/redundancy checks)
-- Layout quality (visual coverage/overflow/layout diversity)
-- Image semantic alignment (prompt coverage/alignment/fallback penalty)
-- Content richness (sparse slide and low-information penalty)
-- Audience fit (takeaway density/readability/final-slide action cue)
-- Consistency (title style/transition consistency/cross-slide completeness gap)
-
-## Run Web server
-
-```bash
-npm start
-```
-
-Open <http://localhost:3000>.
-
-## CLI generation
-
-```bash
-npm run generate -- --input input/计算机发展史.docx --output output/计算机发展史-unified.pptx
-```
-
-Creative mode:
-
-```bash
-npm run generate -- --input input/计算机发展史.docx --output output/计算机发展史-creative.pptx --planner-mode creative
-```
-
-## API
-
-`POST /generate-ppt`
-
-- Content-Type: `multipart/form-data`
-- Field: `file` (`.md/.docx/.pdf`)
-- Optional field: `plannerMode` (`strict` or `creative`)
-- Returns: generated `.pptx`
-
-Example:
-
-```bash
-curl -X POST http://localhost:3000/generate-ppt \
-  -F "file=@input/计算机发展史.docx" \
-  -F "plannerMode=creative" \
-  --output output/from-api.pptx
-```
-
-## Render modes
-
-- Template overlay mode (default): full-screen image + concise text overlay
-- Image-only mode: set `PPT_IMAGE_ONLY_MODE=true`
-
-## Node compatibility
-
-- Recommended: Node.js `>=16`
-- Includes `Object.hasOwn` polyfill for older runtime compatibility
+在 `generate_ppt/templates/` 下新增模板类，然后在 `generate_ppt/templates/registry.py` 注册即可。

@@ -1,45 +1,8 @@
-# Dependencies
-node_modules/
-
-# Build output
-dist/
-
-# Uploaded files
-src/uploads/
-uploads/
-
-# Environment variables
-.env
-.env.local
-.env.*.local
-
-# Logs
-logs/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+workspace/
+.pytest_cache/
+.mypy_cache/
 *.log
-npm-debug.log*
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Test files
-test-*.pptx
-test-*.pdf
-test-*.docx
-
-# Output folder
-output/
-
-# Input folder
-input/
-
-# Mark folder
-mark/
-
-test_data/
