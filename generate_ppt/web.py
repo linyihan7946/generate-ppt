@@ -6,7 +6,7 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request, send_file
+from flask import Flask, jsonify, redirect, render_template, request, send_file, url_for
 from werkzeug.utils import secure_filename
 
 from generate_ppt.pipeline import generate_ppt
@@ -20,15 +20,29 @@ ALLOWED_EXTENSIONS = {".pdf", ".docx", ".md", ".markdown", ".txt"}
 
 
 def create_app() -> Flask:
-    app = Flask(__name__, template_folder=str(ROOT / "web_templates"), static_folder=str(ROOT / "static"))
+    public_base_path = os.environ.get("PUBLIC_BASE_PATH", "").strip("/")
+    route_prefix = f"/{public_base_path}" if public_base_path else ""
+    static_url_path = f"{route_prefix}/static" if route_prefix else None
+
+    app = Flask(
+        __name__,
+        template_folder=str(ROOT / "web_templates"),
+        static_folder=str(ROOT / "static"),
+        static_url_path=static_url_path,
+    )
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    @app.get("/")
+    if route_prefix:
+        @app.get(route_prefix)
+        def index_no_slash():
+            return redirect(f"{route_prefix}/")
+
+    @app.get(f"{route_prefix}/")
     def index():
         return render_template("index.html", templates=list_templates())
 
-    @app.post("/api/generate")
+    @app.post(f"{route_prefix}/api/generate")
     def api_generate():
         upload = request.files.get("document")
         template_id = request.form.get("template_id", "technical-no-image")
@@ -52,11 +66,11 @@ def create_app() -> Flask:
         return jsonify(
             {
                 "filename": output_path.name,
-                "download_url": f"/download/{output_path.name}",
+                "download_url": url_for("download", filename=output_path.name),
             }
         )
 
-    @app.get("/download/<filename>")
+    @app.get(f"{route_prefix}/download/<filename>")
     def download(filename: str):
         output_path = OUTPUT_DIR / filename
         if not output_path.exists():
